@@ -1,3 +1,5 @@
+## HOOMD-blue fork with our ReactiveLJ coordination-attenuated Lennard-Jones potential and analytic, energy-consistent (conservative) CPU/GPU forces.
+
 [![HOOMD-blue](sphinx-doc/hoomdblue-logo-horizontal.svg)](https://glotzerlab.engin.umich.edu/hoomd-blue/)
 
 [![Citing HOOMD](https://img.shields.io/badge/cite-hoomd-blue.svg)](https://hoomd-blue.readthedocs.io/en/latest/citing.html)
