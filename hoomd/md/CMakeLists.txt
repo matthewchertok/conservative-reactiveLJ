@@ -19,6 +19,7 @@ set(_md_sources module-md.cc
                    ConstantForceCompute.cc
                    CosineSqAngleForceCompute.cc
                    CustomForceCompute.cc
+                   ReactiveLJForceCompute.cc
                    EvaluatorWalls.cc
                    FIREEnergyMinimizer.cc
                    ForceComposite.cc
@@ -99,6 +100,9 @@ set(_md_headers ActiveForceComputeGPU.h
                 CosineSqAngleForceGPU.cuh
                 CosineSqAngleForceCompute.h
                 CustomForceCompute.h
+                ReactiveLJForceCompute.h
+                ReactiveLJForceComputeGPU.h
+                ReactiveLJForceComputeGPU.cuh
                 EvaluatorBondFENE.h
                 EvaluatorBondHarmonic.h
                 EvaluatorBondTether.h
@@ -277,6 +281,7 @@ list(APPEND _md_sources ActiveForceComputeGPU.cc
                            ComputeThermoGPU.cc
                            ComputeThermoHMAGPU.cc
                            ConstantForceComputeGPU.cc
+                           ReactiveLJForceComputeGPU.cc
                            FIREEnergyMinimizerGPU.cc
                            ForceCompositeGPU.cc
                            ForceDistanceConstraintGPU.cc
@@ -317,6 +322,7 @@ set(_md_cu_sources ActiveForceComputeGPU.cu
                       ComputeThermoGPU.cu
                       ComputeThermoHMAGPU.cu
                       ConstantForceComputeGPU.cu
+                      ReactiveLJForceComputeGPU.cu
                       BondTablePotentialGPU.cu
                       CommunicatorGridGPU.cu
                       FIREEnergyMinimizerGPU.cu

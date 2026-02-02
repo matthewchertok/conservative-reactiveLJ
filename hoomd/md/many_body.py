@@ -40,7 +40,7 @@ import warnings
 
 import hoomd
 from hoomd.data.parameterdicts import ParameterDict, TypeParameterDict
-from hoomd.data.typeconverter import positive_real
+from hoomd.data.typeconverter import positive_real, nonnegative_real, OnlyIf
 from hoomd.data.typeparam import TypeParameter
 from hoomd.md import _md
 from hoomd.md.force import Force
@@ -505,7 +505,206 @@ class SquareDensity(Triplet):
         self._add_typeparam(params)
 
 
+class ReactiveLJ(Force):
+    r"""Coordination-attenuated Lennard-Jones force.
+
+    `ReactiveLJ` modulates the attractive branch of the Lennard-Jones
+    interaction according to each particle's local coordination. Attractive
+    interactions weaken as additional reactive neighbors approach either member
+    of the pair, enabling dynamic bond swapping.
+
+    Attributes:
+        nlist (hoomd.md.nlist.NeighborList): Neighbor list used to construct the
+            interaction.
+        reactive_type (str): Name of the particle type that participates in the
+            reactive interaction.
+        sigma (float): Lennard-Jones :math:`\sigma` :math:`[\mathrm{length}]`.
+        epsilon (float): Lennard-Jones :math:`\epsilon` :math:`[\mathrm{energy}]`.
+        r_cut (float | None): Cutoff distance. When ``None`` defaults to
+            ``1.5 * sigma``.
+        weakening_inner (float | None): Inner radius of the coordination window.
+            When ``None`` defaults to ``1.3 * sigma``.
+        weakening_outer (float | None): Outer radius of the coordination window.
+            When ``None`` defaults to ``1.5 * sigma``.
+        weakening_exponent (float): Attenuation exponent (non-negative).
+        smooth_elbow (bool): Enables Hermite smoothing around the Lennard-Jones
+            elbow.
+        smooth_kappa (float): Prefactor that sets the smoothing window
+            half-width (default ``0.05``).
+        smooth_beta (float): Exponent controlling how the smoothing window
+            closes as weakening increases (default ``1``).
+    """
+
+    __doc__ = inspect.cleandoc(__doc__).replace(
+        "{inherited}", inspect.cleandoc(Force._doc_inherited)
+    )
+
+    def __init__(
+        self,
+        nlist,
+        reactive_type,
+        sigma,
+        epsilon,
+        r_cut=None,
+        weakening_inner=None,
+        weakening_outer=None,
+        weakening_exponent=4.0,
+        smooth_elbow=True,
+        smooth_kappa=0.05,
+        smooth_beta=1.0,
+    ):
+        super().__init__()
+
+        optional_positive = OnlyIf(positive_real, allow_none=True)
+
+        param_dict = ParameterDict(
+            nlist=hoomd.md.nlist.NeighborList,
+            reactive_type=str,
+            sigma=positive_real,
+            epsilon=positive_real,
+            r_cut=optional_positive,
+            weakening_inner=optional_positive,
+            weakening_outer=optional_positive,
+            weakening_exponent=nonnegative_real,
+            smooth_elbow=bool,
+            smooth_kappa=nonnegative_real,
+            smooth_beta=positive_real,
+        )
+
+        param_dict["nlist"] = nlist
+        param_dict["reactive_type"] = reactive_type
+        param_dict["sigma"] = sigma
+        param_dict["epsilon"] = epsilon
+        param_dict["r_cut"] = r_cut
+        param_dict["weakening_inner"] = weakening_inner
+        param_dict["weakening_outer"] = weakening_outer
+        param_dict["weakening_exponent"] = weakening_exponent
+        param_dict["smooth_elbow"] = smooth_elbow
+        param_dict["smooth_kappa"] = smooth_kappa
+        param_dict["smooth_beta"] = smooth_beta
+
+        self._param_dict.update(param_dict)
+
+    def _effective_parameters(self):
+        sigma = self.sigma
+        epsilon = self.epsilon
+
+        r_cut = self.r_cut if self.r_cut is not None else 1.5 * sigma
+        weakening_inner = (
+            self.weakening_inner if self.weakening_inner is not None else 1.3 * sigma
+        )
+        weakening_outer = (
+            self.weakening_outer if self.weakening_outer is not None else 1.5 * sigma
+        )
+
+        if weakening_outer <= weakening_inner:
+            raise ValueError("weakening_outer must be greater than weakening_inner")
+
+        weakening_exponent = self.weakening_exponent
+        smooth_elbow = self.smooth_elbow
+        smooth_kappa = self.smooth_kappa
+        smooth_beta = self.smooth_beta
+
+        return (
+            sigma,
+            epsilon,
+            r_cut,
+            weakening_inner,
+            weakening_outer,
+            weakening_exponent,
+            smooth_elbow,
+            smooth_kappa,
+            smooth_beta,
+        )
+
+    def _apply_cpp_parameters(self):
+        if not self._attached:
+            return
+
+        (
+            sigma,
+            epsilon,
+            r_cut,
+            weakening_inner,
+            weakening_outer,
+            weakening_exponent,
+            smooth_elbow,
+            smooth_kappa,
+            smooth_beta,
+        ) = self._effective_parameters()
+        self._cpp_obj.setParameters(
+            sigma,
+            epsilon,
+            r_cut,
+            weakening_inner,
+            weakening_outer,
+            weakening_exponent,
+            smooth_elbow,
+            smooth_kappa,
+            smooth_beta,
+        )
+
+    def _setattr_param(self, attr, value):
+        if attr == "nlist":
+            if self._attached:
+                raise RuntimeError("nlist cannot be set after scheduling.")
+            self._param_dict._dict["nlist"] = value
+            return
+        if attr == "reactive_type" and self._attached:
+            raise RuntimeError("reactive_type cannot be set after scheduling.")
+
+        super()._setattr_param(attr, value)
+
+        if attr != "nlist":
+            self._apply_cpp_parameters()
+
+    def _attach_hook(self):
+        if self.nlist._attached and self.nlist._simulation != self._simulation:
+            warnings.warn(
+                f"{self} object is creating a new equivalent neighbor list."
+                f" This is happending since the force is moving to a new "
+                f"simulation. Explicitly set the nlist to hide this warning.",
+                RuntimeWarning,
+            )
+            self.nlist = copy.deepcopy(self.nlist)
+
+        self.nlist._attach(self._simulation)
+
+        (
+            sigma,
+            epsilon,
+            r_cut,
+            weakening_inner,
+            weakening_outer,
+            weakening_exponent,
+            smooth_elbow,
+            smooth_kappa,
+            smooth_beta,
+        ) = self._effective_parameters()
+
+        if isinstance(self._simulation.device, hoomd.device.CPU):
+            cpp_cls = _md.ReactiveLJForceCompute
+        else:
+            cpp_cls = _md.ReactiveLJForceComputeGPU
+
+        self._cpp_obj = cpp_cls(
+            self._simulation.state._cpp_sys_def,
+            self.nlist._cpp_obj,
+            self.reactive_type,
+            sigma,
+            epsilon,
+            r_cut,
+            weakening_inner,
+            weakening_outer,
+            weakening_exponent,
+            smooth_elbow,
+            smooth_kappa,
+            smooth_beta,
+        )
+
+
 __all__ = [
+    "ReactiveLJ",
     "RevCross",
     "SquareDensity",
     "Tersoff",
