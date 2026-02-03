@@ -98,6 +98,7 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
     ArrayHandle<Scalar> d_virial(m_virial, access_location::device, access_mode::readwrite);
     ArrayHandle<Scalar> d_coord(m_coordination, access_location::device, access_mode::readwrite);
     ArrayHandle<Scalar> d_lambda(m_lambda, access_location::device, access_mode::readwrite);
+    {
     ArrayHandle<unsigned int> d_error(m_error_flag,
                                       access_location::device,
                                       access_mode::readwrite);
@@ -193,6 +194,7 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
         CHECK_CUDA_ERROR();
         }
     m_tuner_force->end();
+    }
 
     ArrayHandle<unsigned int> h_error(m_error_flag,
                                       access_location::host,
