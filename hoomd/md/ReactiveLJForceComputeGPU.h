@@ -41,9 +41,16 @@ class PYBIND11_EXPORT ReactiveLJForceComputeGPU : public ReactiveLJForceCompute
     void computeForces(uint64_t timestep) override;
 
     private:
+    // We keep three autotuners because the implementation is split into
+    // three kernels (coordination, lambda, and force accumulation), and each
+    // kernel has a different occupancy / memory profile.
     std::shared_ptr<Autotuner<1>> m_tuner_coord;
     std::shared_ptr<Autotuner<1>> m_tuner_lambda;
     std::shared_ptr<Autotuner<1>> m_tuner_force;
+    // Directed per-neighbor contribution gate*dU/dCexc from pass 2.
+    // Pass 3 reuses this cache to avoid recomputing expensive terms.
+    GPUArray<Scalar> m_pair_contrib;
+    // Device-side error code used by smoothing-bound checks.
     GPUArray<unsigned int> m_error_flag;
     };
 

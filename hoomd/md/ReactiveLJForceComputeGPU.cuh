@@ -20,6 +20,8 @@ namespace kernel
 
 struct reactive_lj_params
     {
+    // Immutable parameters copied once per launch so kernels can read them
+    // from fast argument space instead of repeatedly touching class state.
     Scalar sigma;
     Scalar epsilon;
     Scalar r_cut;
@@ -38,6 +40,7 @@ struct reactive_lj_params
     Scalar smooth_r_min;
     };
 
+// Pass 1: coordination accumulation for reactive particles.
 hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
                                                const Scalar4* d_pos,
                                                const unsigned int* d_n_neigh,
@@ -49,6 +52,7 @@ hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
                                                reactive_lj_params params,
                                                unsigned int block_size);
 
+// Pass 2: lambda accumulation and directed per-neighbor cache fill.
 hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          const Scalar4* d_pos,
                                          const unsigned int* d_n_neigh,
@@ -56,12 +60,14 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          Scalar* d_lambda,
+                                         Scalar* d_pair_contrib,
                                          unsigned int* d_error_flag,
                                          unsigned int reactive_typeid,
                                          BoxDim box,
                                          reactive_lj_params params,
                                          unsigned int block_size);
 
+// Pass 3: pair + coordination force evaluation, with optional virial.
 hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          const Scalar4* d_pos,
                                          const unsigned int* d_n_neigh,
@@ -69,6 +75,7 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          const Scalar* d_lambda,
+                                         const Scalar* d_pair_contrib,
                                          Scalar4* d_force,
                                          Scalar* d_virial,
                                          const size_t virial_pitch,

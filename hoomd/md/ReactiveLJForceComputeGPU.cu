@@ -17,6 +17,8 @@ namespace md
     {
 namespace kernel
     {
+// Smoothly project raw excess coordination onto max(raw, 0). The gate term is
+// dC_exc/draw and is reused in chain-rule terms later on.
 DEVICE inline void evaluateCexcSmooth(Scalar raw, Scalar& C_exc, Scalar& gate)
     {
     const Scalar eps = Scalar(1e-6);
@@ -25,6 +27,7 @@ DEVICE inline void evaluateCexcSmooth(Scalar raw, Scalar& C_exc, Scalar& gate)
     gate = Scalar(0.5) * (Scalar(1.0) + raw / s);
     }
 
+// Cosine window used for coordination weights between inner and outer radii.
 DEVICE inline Scalar computeWeight(Scalar distance, const reactive_lj_params& params)
     {
     if (distance >= params.weakening_outer)
@@ -42,6 +45,7 @@ DEVICE inline Scalar computeWeight(Scalar distance, const reactive_lj_params& pa
     return Scalar(0.5) * (Scalar(1.0) + slow::cos(angle));
     }
 
+// Derivative of the cosine coordination window with respect to distance.
 DEVICE inline Scalar evaluateWeightDerivative(Scalar distance, const reactive_lj_params& params)
     {
     if (distance >= params.weakening_outer || distance <= params.weakening_inner)
@@ -55,6 +59,7 @@ DEVICE inline Scalar evaluateWeightDerivative(Scalar distance, const reactive_lj
     return -Scalar(0.5) * slow::sin(angle) * (pi * params.inverse_span);
     }
 
+// Shifted Lennard-Jones energy used by the ReactiveLJ pair branch.
 DEVICE inline Scalar evaluateEnergy(Scalar distance, const reactive_lj_params& params)
     {
     const Scalar r = (distance > params.smooth_r_min) ? distance : params.smooth_r_min;
@@ -66,6 +71,7 @@ DEVICE inline Scalar evaluateEnergy(Scalar distance, const reactive_lj_params& p
     return Scalar(4.0) * params.epsilon * (sr12 - sr6) - params.energy_shift;
     }
 
+// Positive magnitude of the pair force, F(r), before multiplying by direction.
 DEVICE inline Scalar evaluateForceMagnitude(Scalar distance, const reactive_lj_params& params)
     {
     const Scalar r = (distance > params.smooth_r_min) ? distance : params.smooth_r_min;
@@ -77,6 +83,7 @@ DEVICE inline Scalar evaluateForceMagnitude(Scalar distance, const reactive_lj_p
     return Scalar(24.0) * params.epsilon * inv_r * (Scalar(2.0) * sr12 - sr6);
     }
 
+// Radial derivative dF/dr used in the smoothing-region chain rule.
 DEVICE inline Scalar evaluateForceDerivative(Scalar distance, const reactive_lj_params& params)
     {
     const Scalar r = (distance > params.smooth_r_min) ? distance : params.smooth_r_min;
@@ -92,6 +99,8 @@ DEVICE inline Scalar evaluateForceDerivative(Scalar distance, const reactive_lj_
            * (Scalar(-26.0) * sr12 + Scalar(7.0) * sr6);
     }
 
+// Compute dU/dC_exc for one directed pair. This drives the many-body lambda
+// accumulation and, through lambda, the coordination force in pass 3.
 DEVICE inline Scalar evaluate_dU_dCexc(Scalar r_in,
                                       Scalar C_exc,
                                       const reactive_lj_params& params,
@@ -116,6 +125,7 @@ DEVICE inline Scalar evaluate_dU_dCexc(Scalar r_in,
 
     if (params.smooth_elbow)
         {
+        // As weakening grows, the Hermite blending window opens around r_elbow.
         const Scalar one_minus_W
             = (Scalar(1.0) > W) ? (Scalar(1.0) - W) : Scalar(0.0);
         delta = params.smooth_kappa * params.sigma * slow::pow(one_minus_W, params.smooth_beta);
@@ -140,6 +150,7 @@ DEVICE inline Scalar evaluate_dU_dCexc(Scalar r_in,
         else
             {
             L = r2 - r1;
+            // Outside this narrow region we fall back to the simpler branch.
             if (delta > params.smooth_delta_tol && L > params.smooth_delta_tol && r > r1
                 && r < r2)
                 {
@@ -150,6 +161,7 @@ DEVICE inline Scalar evaluate_dU_dCexc(Scalar r_in,
 
     if (!smoothing_active)
         {
+        // Unsmoothed branch: only the attractive part is weakened by W(C_exc).
         const Scalar U_LJ = evaluateEnergy(r, params);
         const Scalar U_att = (U_LJ < Scalar(0.0)) ? U_LJ : Scalar(0.0);
         return U_att * dW_dC;
@@ -229,6 +241,7 @@ __global__ void gpu_reactivelj_compute_coordination_kernel(const unsigned int N,
                                                            BoxDim box,
                                                            reactive_lj_params params)
     {
+    // Pass 1: each thread computes one particle's scalar coordination.
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
         {
@@ -297,11 +310,14 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
                                                      const size_t* d_head_list,
                                                      const Scalar* d_coord,
                                                      Scalar* d_lambda,
+                                                     Scalar* d_pair_contrib,
                                                      unsigned int* d_error_flag,
                                                      unsigned int reactive_typeid,
                                                      BoxDim box,
                                                      reactive_lj_params params)
     {
+    // Pass 2: lambda_i = sum_j gate_ij * dU_ij/dC_exc, and cache each directed
+    // term so pass 3 can reuse it.
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
         {
@@ -325,6 +341,10 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
 
     for (unsigned int k = 0; k < n_neigh; ++k)
         {
+        const size_t nlist_idx = head + k;
+        // Default to zero so pass 3 can safely read this entry.
+        d_pair_contrib[nlist_idx] = Scalar(0.0);
+
         const unsigned int j = d_nlist[head + k];
         if (j >= N)
             {
@@ -369,6 +389,7 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
         const Scalar contrib = gate * dU_dCexc;
 
         lambda += contrib;
+        d_pair_contrib[nlist_idx] = contrib;
         }
 
     d_lambda[idx] = lambda;
@@ -381,6 +402,7 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
                                                      const size_t* d_head_list,
                                                      const Scalar* d_coord,
                                                      const Scalar* d_lambda,
+                                                     const Scalar* d_pair_contrib,
                                                      Scalar4* d_force,
                                                      Scalar* d_virial,
                                                      const size_t virial_pitch,
@@ -390,6 +412,7 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
                                                      reactive_lj_params params,
                                                      unsigned int compute_virial)
     {
+    // Pass 3: evaluate pair force, coordination force, and energy/virial.
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
         {
@@ -454,10 +477,19 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
             r = small_r;
             }
 
+        // Early-out gate: if neither pair nor coordination terms can contribute,
+        // skip all expensive weakening / smoothing math.
+        const bool in_pair = rsq < params.r_cut_sq;
+        const bool in_coord_window = r > params.weakening_inner && r < params.weakening_outer;
+        if (!in_pair && !in_coord_window)
+            {
+            continue;
+            }
+
         Scalar pair_energy = Scalar(0.0);
         Scalar force_divr = Scalar(0.0);
 
-        const Scalar weight = computeWeight(r, params);
+        const Scalar weight = (r < params.weakening_outer) ? computeWeight(r, params) : Scalar(0.0);
         const Scalar coordination_j = __ldg(d_coord + j);
         const Scalar raw = (coordination_i - weight) + (coordination_j - weight);
 
@@ -465,7 +497,7 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
         Scalar gate = Scalar(0.0);
         evaluateCexcSmooth(raw, C_exc, gate);
 
-        if (rsq < params.r_cut_sq)
+        if (in_pair)
             {
             const Scalar weakening
                 = slow::pow(Scalar(1.0) + C_exc, -params.weakening_exponent);
@@ -484,6 +516,8 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
 
             if (params.smooth_elbow)
                 {
+                // Inside this interval we replace the sharp elbow with a Hermite
+                // segment to keep force/energy transitions well-behaved.
                 const Scalar one_minus_w
                     = (Scalar(1.0) > weakening) ? (Scalar(1.0) - weakening) : Scalar(0.0);
                 const Scalar delta
@@ -538,12 +572,26 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
             }
 
         Scalar force_divr_coord = Scalar(0.0);
-        if (r > params.weakening_inner && r < params.weakening_outer)
+        if (in_coord_window)
             {
-            const Scalar dU_dCexc_pair = evaluate_dU_dCexc(r, C_exc, params, d_error_flag);
+            Scalar pair_self_contrib = Scalar(0.0);
+            if (in_pair)
+                {
+                const size_t nlist_idx = head + k;
+                // Fast path: reuse gate*dU/dCexc already computed in pass 2.
+                pair_self_contrib = __ldg(d_pair_contrib + nlist_idx);
+                }
+            else
+                {
+                // Fallback for neighbors that contribute to dw/dr but were
+                // outside the pair cutoff in pass 2.
+                const Scalar dU_dCexc_pair = evaluate_dU_dCexc(r, C_exc, params, d_error_flag);
+                pair_self_contrib = gate * dU_dCexc_pair;
+                }
+
             const Scalar lambda_sum = lambda_i + __ldg(d_lambda + j);
             const Scalar lambda_other_sum
-                = lambda_sum - Scalar(2.0) * gate * dU_dCexc_pair;
+                = lambda_sum - Scalar(2.0) * pair_self_contrib;
             const Scalar dw_dr = evaluateWeightDerivative(r, params);
             const Scalar force_mag_coord = -(lambda_other_sum * dw_dr);
             force_divr_coord = force_mag_coord / r;
@@ -622,6 +670,7 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          Scalar* d_lambda,
+                                         Scalar* d_pair_contrib,
                                          unsigned int* d_error_flag,
                                          unsigned int reactive_typeid,
                                          BoxDim box,
@@ -642,6 +691,7 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                        d_head_list,
                        d_coord,
                        d_lambda,
+                       d_pair_contrib,
                        d_error_flag,
                        reactive_typeid,
                        box,
@@ -656,6 +706,7 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          const Scalar* d_lambda,
+                                         const Scalar* d_pair_contrib,
                                          Scalar4* d_force,
                                          Scalar* d_virial,
                                          const size_t virial_pitch,
@@ -680,6 +731,7 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                        d_head_list,
                        d_coord,
                        d_lambda,
+                       d_pair_contrib,
                        d_force,
                        d_virial,
                        virial_pitch,
