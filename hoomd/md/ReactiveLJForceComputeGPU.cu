@@ -17,6 +17,48 @@ namespace md
     {
 namespace kernel
     {
+#if HOOMD_LONGREAL_SIZE == 64
+#if (__CUDA_ARCH__ < 600)
+DEVICE inline double atomicAddScalar(double* address, double val)
+    {
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
+    do
+        {
+        assumed = old;
+        old = atomicCAS(address_as_ull,
+                        assumed,
+                        __double_as_longlong(val + __longlong_as_double(assumed)));
+        } while (assumed != old);
+    return __longlong_as_double(old);
+    }
+#else
+DEVICE inline double atomicAddScalar(double* address, double val)
+    {
+    return atomicAdd(address, val);
+    }
+#endif
+#else
+#ifdef __HIP_PLATFORM_HCC__
+DEVICE inline float atomicAddScalar(float* address, float val)
+    {
+    unsigned int* address_as_uint = (unsigned int*)address;
+    unsigned int old = *address_as_uint, assumed;
+    do
+        {
+        assumed = old;
+        old = atomicCAS(address_as_uint, assumed, __float_as_uint(val + __uint_as_float(assumed)));
+        } while (assumed != old);
+    return __uint_as_float(old);
+    }
+#else
+DEVICE inline float atomicAddScalar(float* address, float val)
+    {
+    return atomicAdd(address, val);
+    }
+#endif
+#endif
+
 // Smoothly project raw excess coordination onto max(raw, 0). The gate term is
 // dC_exc/draw and is reused in chain-rule terms later on.
 DEVICE inline void evaluateCexcSmooth(Scalar raw, Scalar& C_exc, Scalar& gate)
@@ -310,14 +352,13 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
                                                      const size_t* d_head_list,
                                                      const Scalar* d_coord,
                                                      Scalar* d_lambda,
-                                                     Scalar* d_pair_contrib,
                                                      unsigned int* d_error_flag,
                                                      unsigned int reactive_typeid,
                                                      BoxDim box,
                                                      reactive_lj_params params)
     {
-    // Pass 2: lambda_i = sum_j gate_ij * dU_ij/dC_exc, and cache each directed
-    // term so pass 3 can reuse it.
+    // Pass 2: process each pair once (j > i) and atomically update both
+    // endpoints so lambda matches CPU pair-once semantics.
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
         {
@@ -328,7 +369,6 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
     const unsigned int type_i = __scalar_as_int(pos_i.w);
     if (type_i != reactive_typeid)
         {
-        d_lambda[idx] = Scalar(0.0);
         return;
         }
 
@@ -337,16 +377,10 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
     const unsigned int n_neigh = d_n_neigh[idx];
     const Scalar Ci = __ldg(d_coord + idx);
 
-    Scalar lambda = Scalar(0.0);
-
     for (unsigned int k = 0; k < n_neigh; ++k)
         {
-        const size_t nlist_idx = head + k;
-        // Default to zero so pass 3 can safely read this entry.
-        d_pair_contrib[nlist_idx] = Scalar(0.0);
-
         const unsigned int j = d_nlist[head + k];
-        if (j >= N)
+        if (j >= N || j <= idx)
             {
             continue;
             }
@@ -388,11 +422,9 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
         const Scalar dU_dCexc = evaluate_dU_dCexc(r, C_exc, params, d_error_flag);
         const Scalar contrib = gate * dU_dCexc;
 
-        lambda += contrib;
-        d_pair_contrib[nlist_idx] = contrib;
+        atomicAddScalar(d_lambda + idx, contrib);
+        atomicAddScalar(d_lambda + j, contrib);
         }
-
-    d_lambda[idx] = lambda;
     }
 
 __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
@@ -402,7 +434,6 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
                                                      const size_t* d_head_list,
                                                      const Scalar* d_coord,
                                                      const Scalar* d_lambda,
-                                                     const Scalar* d_pair_contrib,
                                                      Scalar4* d_force,
                                                      Scalar* d_virial,
                                                      const size_t virial_pitch,
@@ -574,20 +605,8 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
         Scalar force_divr_coord = Scalar(0.0);
         if (in_coord_window)
             {
-            Scalar pair_self_contrib = Scalar(0.0);
-            if (in_pair)
-                {
-                const size_t nlist_idx = head + k;
-                // Fast path: reuse gate*dU/dCexc already computed in pass 2.
-                pair_self_contrib = __ldg(d_pair_contrib + nlist_idx);
-                }
-            else
-                {
-                // Fallback for neighbors that contribute to dw/dr but were
-                // outside the pair cutoff in pass 2.
-                const Scalar dU_dCexc_pair = evaluate_dU_dCexc(r, C_exc, params, d_error_flag);
-                pair_self_contrib = gate * dU_dCexc_pair;
-                }
+            const Scalar dU_dCexc_pair = evaluate_dU_dCexc(r, C_exc, params, d_error_flag);
+            const Scalar pair_self_contrib = gate * dU_dCexc_pair;
 
             const Scalar lambda_sum = lambda_i + __ldg(d_lambda + j);
             const Scalar lambda_other_sum
@@ -670,7 +689,6 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          Scalar* d_lambda,
-                                         Scalar* d_pair_contrib,
                                          unsigned int* d_error_flag,
                                          unsigned int reactive_typeid,
                                          BoxDim box,
@@ -691,7 +709,6 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                        d_head_list,
                        d_coord,
                        d_lambda,
-                       d_pair_contrib,
                        d_error_flag,
                        reactive_typeid,
                        box,
@@ -706,7 +723,6 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          const Scalar* d_lambda,
-                                         const Scalar* d_pair_contrib,
                                          Scalar4* d_force,
                                          Scalar* d_virial,
                                          const size_t virial_pitch,
@@ -731,7 +747,6 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                        d_head_list,
                        d_coord,
                        d_lambda,
-                       d_pair_contrib,
                        d_force,
                        d_virial,
                        virial_pitch,

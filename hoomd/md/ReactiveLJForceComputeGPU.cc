@@ -7,7 +7,6 @@
 
 #include "hoomd/Autotuner.h"
 
-#include <algorithm>
 #include <stdexcept>
 
 namespace hoomd
@@ -59,13 +58,6 @@ ReactiveLJForceComputeGPU::ReactiveLJForceComputeGPU(std::shared_ptr<SystemDefin
                                          "reactivelj_force"));
     m_autotuners.insert(m_autotuners.end(), {m_tuner_coord, m_tuner_lambda, m_tuner_force});
 
-    // Cache one scalar per directed neighbor-list entry. We seed with size 1
-    // so construction stays valid even before the first neighbor-list build.
-    GPUArray<Scalar> pair_contrib(std::max<size_t>(size_t(1),
-                                                   m_nlist->getNListArray().getNumElements()),
-                                  m_exec_conf);
-    m_pair_contrib.swap(pair_contrib);
-
     GPUArray<unsigned int> error_flag(1, m_exec_conf);
     m_error_flag.swap(error_flag);
 
@@ -80,11 +72,6 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
     {
     m_nlist->compute(timestep);
     ensureScratchSize();
-    const size_t nlist_entries = m_nlist->getNListArray().getNumElements();
-    if (m_pair_contrib.getNumElements() < nlist_entries)
-        {
-        m_pair_contrib.resize(nlist_entries);
-        }
 
     bool third_law = m_nlist->getStorageMode() == NeighborList::half;
     if (third_law)
@@ -111,9 +98,6 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
     ArrayHandle<Scalar> d_virial(m_virial, access_location::device, access_mode::readwrite);
     ArrayHandle<Scalar> d_coord(m_coordination, access_location::device, access_mode::readwrite);
     ArrayHandle<Scalar> d_lambda(m_lambda, access_location::device, access_mode::readwrite);
-    ArrayHandle<Scalar> d_pair_contrib(m_pair_contrib,
-                                       access_location::device,
-                                       access_mode::readwrite);
     {
     ArrayHandle<unsigned int> d_error(m_error_flag,
                                       access_location::device,
@@ -170,7 +154,7 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
         }
     m_tuner_coord->end();
 
-    // Pass 2: accumulate lambda and cache per-neighbor directed contributions.
+    // Pass 2: accumulate lambda on each endpoint (pair-once, CPU-equivalent semantics).
     m_tuner_lambda->begin();
     kernel::gpu_reactivelj_compute_lambda(N,
                                           d_pos.data,
@@ -179,7 +163,6 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
                                           d_head_list.data,
                                           d_coord.data,
                                           d_lambda.data,
-                                          d_pair_contrib.data,
                                           d_error.data,
                                           m_reactive_typeid,
                                           box,
@@ -200,7 +183,6 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
                                           d_head_list.data,
                                           d_coord.data,
                                           d_lambda.data,
-                                          d_pair_contrib.data,
                                           d_force.data,
                                           d_virial.data,
                                           virial_pitch,
