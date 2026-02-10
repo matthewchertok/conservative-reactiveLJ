@@ -40,6 +40,15 @@ struct reactive_lj_params
     Scalar smooth_r_min;
     };
 
+//! Query max block size for the coordination kernel on the active device.
+hipError_t gpu_reactivelj_get_coordination_max_block_size(unsigned int& max_block_size);
+
+//! Query max block size for the lambda kernel on the active device.
+hipError_t gpu_reactivelj_get_lambda_max_block_size(unsigned int& max_block_size);
+
+//! Query max block size for the force kernel on the active device.
+hipError_t gpu_reactivelj_get_force_max_block_size(unsigned int& max_block_size);
+
 // Pass 1: coordination accumulation for reactive particles.
 hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
                                                const Scalar4* d_pos,

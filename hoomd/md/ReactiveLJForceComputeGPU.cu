@@ -10,6 +10,8 @@
 #include "hoomd/VectorMath.h"
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 #define DEVICE __device__
 
@@ -19,6 +21,48 @@ namespace md
     {
 namespace kernel
     {
+namespace
+    {
+hipError_t getCachedMaxThreadsPerBlock(const void* kernel_ptr,
+                                       std::unordered_map<int, unsigned int>& cache,
+                                       std::mutex& cache_mutex,
+                                       unsigned int& max_threads_per_block)
+    {
+    int device = -1;
+    hipError_t err = hipGetDevice(&device);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
+
+    {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(device);
+    if (it != cache.end())
+        {
+        max_threads_per_block = it->second;
+        return hipSuccess;
+        }
+    }
+
+    hipFuncAttributes attr;
+    err = hipFuncGetAttributes(&attr, kernel_ptr);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
+
+    max_threads_per_block = static_cast<unsigned int>(attr.maxThreadsPerBlock);
+
+    {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    cache.emplace(device, max_threads_per_block);
+    }
+
+    return hipSuccess;
+    }
+    } // end namespace
+
 #if HOOMD_LONGREAL_SIZE == 64
 #if (__CUDA_ARCH__ < 600)
 DEVICE inline double atomicAddScalar(double* address, double val)
@@ -359,8 +403,9 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
                                                      BoxDim box,
                                                      reactive_lj_params params)
     {
-    // Pass 2: process each pair once (j > i) and atomically update both
-    // endpoints so lambda matches CPU pair-once semantics.
+    // Pass 2: process each pair once (j > i). Accumulate i's contribution in a
+    // thread-local register and atomically add once at the end; atomically
+    // update j per pair. This preserves CPU-equivalent pair-once semantics.
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
         {
@@ -378,6 +423,7 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
     const size_t head = d_head_list[idx];
     const unsigned int n_neigh = d_n_neigh[idx];
     const Scalar Ci = __ldg(d_coord + idx);
+    Scalar lambda_local = Scalar(0.0);
 
     for (unsigned int k = 0; k < n_neigh; ++k)
         {
@@ -424,11 +470,17 @@ __global__ void gpu_reactivelj_compute_lambda_kernel(const unsigned int N,
         const Scalar dU_dCexc = evaluate_dU_dCexc(r, C_exc, params, d_error_flag);
         const Scalar contrib = gate * dU_dCexc;
 
-        atomicAddScalar(d_lambda + idx, contrib);
+        lambda_local += contrib;
         atomicAddScalar(d_lambda + j, contrib);
+        }
+
+    if (lambda_local != Scalar(0.0))
+        {
+        atomicAddScalar(d_lambda + idx, lambda_local);
         }
     }
 
+template<bool compute_virial>
 __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
                                                      const Scalar4* d_pos,
                                                      const unsigned int* d_n_neigh,
@@ -442,8 +494,7 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
                                                      unsigned int* d_error_flag,
                                                      unsigned int reactive_typeid,
                                                      BoxDim box,
-                                                     reactive_lj_params params,
-                                                     unsigned int compute_virial)
+                                                     reactive_lj_params params)
     {
     // Pass 3: evaluate pair force, coordination force, and energy/virial.
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -626,7 +677,7 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
 
         pei += Scalar(0.5) * pair_energy;
 
-        if (compute_virial)
+        if constexpr (compute_virial)
             {
             const Scalar force_div2r = Scalar(0.5) * total_force_divr;
             virial_xx += force_div2r * dx.x * dx.x;
@@ -643,7 +694,7 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
     d_force[idx].z += fi.z;
     d_force[idx].w += pei;
 
-    if (compute_virial)
+    if constexpr (compute_virial)
         {
         d_virial[0 * virial_pitch + idx] += virial_xx;
         d_virial[1 * virial_pitch + idx] += virial_xy;
@@ -652,6 +703,71 @@ __global__ void gpu_reactivelj_compute_forces_kernel(const unsigned int N,
         d_virial[4 * virial_pitch + idx] += virial_yz;
         d_virial[5 * virial_pitch + idx] += virial_zz;
         }
+    }
+
+hipError_t gpu_reactivelj_get_coordination_max_block_size(unsigned int& max_block_size)
+    {
+    static std::mutex cache_mutex;
+    static std::unordered_map<int, unsigned int> max_threads_cache;
+    return getCachedMaxThreadsPerBlock((const void*)gpu_reactivelj_compute_coordination_kernel,
+                                       max_threads_cache,
+                                       cache_mutex,
+                                       max_block_size);
+    }
+
+hipError_t gpu_reactivelj_get_lambda_max_block_size(unsigned int& max_block_size)
+    {
+    static std::mutex cache_mutex;
+    static std::unordered_map<int, unsigned int> max_threads_cache;
+    return getCachedMaxThreadsPerBlock((const void*)gpu_reactivelj_compute_lambda_kernel,
+                                       max_threads_cache,
+                                       cache_mutex,
+                                       max_block_size);
+    }
+
+namespace
+    {
+hipError_t gpu_reactivelj_get_force_variant_max_block_size(bool compute_virial,
+                                                           unsigned int& max_block_size)
+    {
+    static std::mutex cache_mutex;
+    static std::unordered_map<int, unsigned int> max_threads_cache_with_virial;
+    static std::unordered_map<int, unsigned int> max_threads_cache_without_virial;
+    if (compute_virial)
+        {
+        return getCachedMaxThreadsPerBlock((const void*)gpu_reactivelj_compute_forces_kernel<true>,
+                                           max_threads_cache_with_virial,
+                                           cache_mutex,
+                                           max_block_size);
+        }
+
+    return getCachedMaxThreadsPerBlock((const void*)gpu_reactivelj_compute_forces_kernel<false>,
+                                       max_threads_cache_without_virial,
+                                       cache_mutex,
+                                       max_block_size);
+    }
+    } // end namespace
+
+hipError_t gpu_reactivelj_get_force_max_block_size(unsigned int& max_block_size)
+    {
+    unsigned int max_block_size_with_virial = 0;
+    hipError_t err
+        = gpu_reactivelj_get_force_variant_max_block_size(true, max_block_size_with_virial);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
+
+    unsigned int max_block_size_without_virial = 0;
+    err = gpu_reactivelj_get_force_variant_max_block_size(false, max_block_size_without_virial);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
+
+    // Use the stricter limit so one autotuner range is valid for both variants.
+    max_block_size = std::min(max_block_size_with_virial, max_block_size_without_virial);
+    return hipSuccess;
     }
 
 hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
@@ -665,18 +781,14 @@ hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
                                                reactive_lj_params params,
                                                unsigned int block_size)
     {
-    // Clamp autotuned values to the kernel's launchable thread limit. Without
-    // this, oversized block sizes can fail launch and silently zero out this
-    // force path when runtime CUDA error checking is disabled.
-    hipFuncAttributes attr;
-    hipError_t attr_err
-        = hipFuncGetAttributes(&attr, (const void*)gpu_reactivelj_compute_coordination_kernel);
-    if (attr_err != hipSuccess)
+    unsigned int max_threads_per_block = 0;
+    hipError_t cache_err = gpu_reactivelj_get_coordination_max_block_size(max_threads_per_block);
+    if (cache_err != hipSuccess)
         {
-        return attr_err;
+        return cache_err;
         }
     const unsigned int run_block_size
-        = std::min(block_size, static_cast<unsigned int>(attr.maxThreadsPerBlock));
+        = std::min(block_size, max_threads_per_block);
     if (run_block_size == 0)
         {
         return hipErrorInvalidConfiguration;
@@ -714,15 +826,14 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          reactive_lj_params params,
                                          unsigned int block_size)
     {
-    hipFuncAttributes attr;
-    hipError_t attr_err
-        = hipFuncGetAttributes(&attr, (const void*)gpu_reactivelj_compute_lambda_kernel);
-    if (attr_err != hipSuccess)
+    unsigned int max_threads_per_block = 0;
+    hipError_t cache_err = gpu_reactivelj_get_lambda_max_block_size(max_threads_per_block);
+    if (cache_err != hipSuccess)
         {
-        return attr_err;
+        return cache_err;
         }
     const unsigned int run_block_size
-        = std::min(block_size, static_cast<unsigned int>(attr.maxThreadsPerBlock));
+        = std::min(block_size, max_threads_per_block);
     if (run_block_size == 0)
         {
         return hipErrorInvalidConfiguration;
@@ -766,15 +877,17 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          unsigned int compute_virial,
                                          unsigned int block_size)
     {
-    hipFuncAttributes attr;
-    hipError_t attr_err
-        = hipFuncGetAttributes(&attr, (const void*)gpu_reactivelj_compute_forces_kernel);
-    if (attr_err != hipSuccess)
+    const bool do_compute_virial = (compute_virial != 0);
+
+    unsigned int max_threads_per_block = 0;
+    hipError_t cache_err
+        = gpu_reactivelj_get_force_variant_max_block_size(do_compute_virial, max_threads_per_block);
+    if (cache_err != hipSuccess)
         {
-        return attr_err;
+        return cache_err;
         }
     const unsigned int run_block_size
-        = std::min(block_size, static_cast<unsigned int>(attr.maxThreadsPerBlock));
+        = std::min(block_size, max_threads_per_block);
     if (run_block_size == 0)
         {
         return hipErrorInvalidConfiguration;
@@ -782,26 +895,50 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
 
     dim3 grid((N + run_block_size - 1) / run_block_size, 1, 1);
     dim3 threads(run_block_size, 1, 1);
-    hipLaunchKernelGGL((gpu_reactivelj_compute_forces_kernel),
-                       grid,
-                       threads,
-                       0,
-                       0,
-                       N,
-                       d_pos,
-                       d_n_neigh,
-                       d_nlist,
-                       d_head_list,
-                       d_coord,
-                       d_lambda,
-                       d_force,
-                       d_virial,
-                       virial_pitch,
-                       d_error_flag,
-                       reactive_typeid,
-                       box,
-                       params,
-                       compute_virial);
+    if (do_compute_virial)
+        {
+        hipLaunchKernelGGL((gpu_reactivelj_compute_forces_kernel<true>),
+                           grid,
+                           threads,
+                           0,
+                           0,
+                           N,
+                           d_pos,
+                           d_n_neigh,
+                           d_nlist,
+                           d_head_list,
+                           d_coord,
+                           d_lambda,
+                           d_force,
+                           d_virial,
+                           virial_pitch,
+                           d_error_flag,
+                           reactive_typeid,
+                           box,
+                           params);
+        }
+    else
+        {
+        hipLaunchKernelGGL((gpu_reactivelj_compute_forces_kernel<false>),
+                           grid,
+                           threads,
+                           0,
+                           0,
+                           N,
+                           d_pos,
+                           d_n_neigh,
+                           d_nlist,
+                           d_head_list,
+                           d_coord,
+                           d_lambda,
+                           d_force,
+                           d_virial,
+                           virial_pitch,
+                           d_error_flag,
+                           reactive_typeid,
+                           box,
+                           params);
+        }
     return hipGetLastError();
     }
 

@@ -7,6 +7,7 @@
 
 #include "hoomd/Autotuner.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -48,13 +49,51 @@ ReactiveLJForceComputeGPU::ReactiveLJForceComputeGPU(std::shared_ptr<SystemDefin
         throw std::runtime_error("Error initializing ReactiveLJForceComputeGPU");
         }
 
-    m_tuner_coord.reset(new Autotuner<1>({AutotunerBase::makeBlockSizeRange(m_exec_conf)},
+    auto make_block_size_range
+        = [this](hipError_t (*query_max_block_size)(unsigned int&),
+                 const char* kernel_name) -> std::vector<unsigned int>
+    {
+        auto range = AutotunerBase::makeBlockSizeRange(m_exec_conf);
+        unsigned int kernel_max_block_size = 0;
+        const hipError_t err = query_max_block_size(kernel_max_block_size);
+        if (err != hipSuccess || kernel_max_block_size == 0)
+            {
+            m_exec_conf->msg->warning()
+                << "ReactiveLJForceComputeGPU: failed to query max block size for " << kernel_name
+                << " kernel; using default autotuner range. Error: " << hipGetErrorString(err)
+                << std::endl;
+            return range;
+            }
+
+        range.erase(std::remove_if(range.begin(),
+                                   range.end(),
+                                   [kernel_max_block_size](unsigned int block_size)
+                                   { return block_size > kernel_max_block_size; }),
+                    range.end());
+
+        if (range.empty())
+            {
+            range.push_back(kernel_max_block_size);
+            }
+
+        return range;
+    };
+
+    const auto coord_block_size_range
+        = make_block_size_range(kernel::gpu_reactivelj_get_coordination_max_block_size,
+                                "coordination");
+    const auto lambda_block_size_range
+        = make_block_size_range(kernel::gpu_reactivelj_get_lambda_max_block_size, "lambda");
+    const auto force_block_size_range
+        = make_block_size_range(kernel::gpu_reactivelj_get_force_max_block_size, "force");
+
+    m_tuner_coord.reset(new Autotuner<1>({coord_block_size_range},
                                          m_exec_conf,
                                          "reactivelj_coord"));
-    m_tuner_lambda.reset(new Autotuner<1>({AutotunerBase::makeBlockSizeRange(m_exec_conf)},
+    m_tuner_lambda.reset(new Autotuner<1>({lambda_block_size_range},
                                           m_exec_conf,
                                           "reactivelj_lambda"));
-    m_tuner_force.reset(new Autotuner<1>({AutotunerBase::makeBlockSizeRange(m_exec_conf)},
+    m_tuner_force.reset(new Autotuner<1>({force_block_size_range},
                                          m_exec_conf,
                                          "reactivelj_force"));
     m_autotuners.insert(m_autotuners.end(), {m_tuner_coord, m_tuner_lambda, m_tuner_force});
