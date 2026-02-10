@@ -9,6 +9,8 @@
 #include "hoomd/TextureTools.h"
 #include "hoomd/VectorMath.h"
 
+#include <algorithm>
+
 #define DEVICE __device__
 
 namespace hoomd
@@ -663,8 +665,25 @@ hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
                                                reactive_lj_params params,
                                                unsigned int block_size)
     {
-    dim3 grid((N + block_size - 1) / block_size, 1, 1);
-    dim3 threads(block_size, 1, 1);
+    // Clamp autotuned values to the kernel's launchable thread limit. Without
+    // this, oversized block sizes can fail launch and silently zero out this
+    // force path when runtime CUDA error checking is disabled.
+    hipFuncAttributes attr;
+    hipError_t attr_err
+        = hipFuncGetAttributes(&attr, (const void*)gpu_reactivelj_compute_coordination_kernel);
+    if (attr_err != hipSuccess)
+        {
+        return attr_err;
+        }
+    const unsigned int run_block_size
+        = std::min(block_size, static_cast<unsigned int>(attr.maxThreadsPerBlock));
+    if (run_block_size == 0)
+        {
+        return hipErrorInvalidConfiguration;
+        }
+
+    dim3 grid((N + run_block_size - 1) / run_block_size, 1, 1);
+    dim3 threads(run_block_size, 1, 1);
     hipLaunchKernelGGL((gpu_reactivelj_compute_coordination_kernel),
                        grid,
                        threads,
@@ -695,8 +714,22 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          reactive_lj_params params,
                                          unsigned int block_size)
     {
-    dim3 grid((N + block_size - 1) / block_size, 1, 1);
-    dim3 threads(block_size, 1, 1);
+    hipFuncAttributes attr;
+    hipError_t attr_err
+        = hipFuncGetAttributes(&attr, (const void*)gpu_reactivelj_compute_lambda_kernel);
+    if (attr_err != hipSuccess)
+        {
+        return attr_err;
+        }
+    const unsigned int run_block_size
+        = std::min(block_size, static_cast<unsigned int>(attr.maxThreadsPerBlock));
+    if (run_block_size == 0)
+        {
+        return hipErrorInvalidConfiguration;
+        }
+
+    dim3 grid((N + run_block_size - 1) / run_block_size, 1, 1);
+    dim3 threads(run_block_size, 1, 1);
     hipLaunchKernelGGL((gpu_reactivelj_compute_lambda_kernel),
                        grid,
                        threads,
@@ -733,8 +766,22 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          unsigned int compute_virial,
                                          unsigned int block_size)
     {
-    dim3 grid((N + block_size - 1) / block_size, 1, 1);
-    dim3 threads(block_size, 1, 1);
+    hipFuncAttributes attr;
+    hipError_t attr_err
+        = hipFuncGetAttributes(&attr, (const void*)gpu_reactivelj_compute_forces_kernel);
+    if (attr_err != hipSuccess)
+        {
+        return attr_err;
+        }
+    const unsigned int run_block_size
+        = std::min(block_size, static_cast<unsigned int>(attr.maxThreadsPerBlock));
+    if (run_block_size == 0)
+        {
+        return hipErrorInvalidConfiguration;
+        }
+
+    dim3 grid((N + run_block_size - 1) / run_block_size, 1, 1);
+    dim3 threads(run_block_size, 1, 1);
     hipLaunchKernelGGL((gpu_reactivelj_compute_forces_kernel),
                        grid,
                        threads,

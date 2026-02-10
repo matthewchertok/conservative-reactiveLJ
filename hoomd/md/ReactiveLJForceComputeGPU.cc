@@ -8,6 +8,7 @@
 #include "hoomd/Autotuner.h"
 
 #include <stdexcept>
+#include <string>
 
 namespace hoomd
     {
@@ -138,16 +139,22 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
 
     // Pass 1: compute per-particle coordination numbers.
     m_tuner_coord->begin();
-    kernel::gpu_reactivelj_compute_coordination(N,
-                                                d_pos.data,
-                                                d_n_neigh.data,
-                                                d_nlist.data,
-                                                d_head_list.data,
-                                                d_coord.data,
-                                                m_reactive_typeid,
-                                                box,
-                                                params,
-                                                m_tuner_coord->getParam()[0]);
+    hipError_t err = kernel::gpu_reactivelj_compute_coordination(N,
+                                                                 d_pos.data,
+                                                                 d_n_neigh.data,
+                                                                 d_nlist.data,
+                                                                 d_head_list.data,
+                                                                 d_coord.data,
+                                                                 m_reactive_typeid,
+                                                                 box,
+                                                                 params,
+                                                                 m_tuner_coord->getParam()[0]);
+    if (err != hipSuccess)
+        {
+        throw std::runtime_error(std::string("ReactiveLJForceComputeGPU coordination kernel "
+                                             "launch failed: ")
+                                 + hipGetErrorString(err));
+        }
     if (m_exec_conf->isCUDAErrorCheckingEnabled())
         {
         CHECK_CUDA_ERROR();
@@ -156,18 +163,24 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
 
     // Pass 2: accumulate lambda on each endpoint (pair-once, CPU-equivalent semantics).
     m_tuner_lambda->begin();
-    kernel::gpu_reactivelj_compute_lambda(N,
-                                          d_pos.data,
-                                          d_n_neigh.data,
-                                          d_nlist.data,
-                                          d_head_list.data,
-                                          d_coord.data,
-                                          d_lambda.data,
-                                          d_error.data,
-                                          m_reactive_typeid,
-                                          box,
-                                          params,
-                                          m_tuner_lambda->getParam()[0]);
+    err = kernel::gpu_reactivelj_compute_lambda(N,
+                                                d_pos.data,
+                                                d_n_neigh.data,
+                                                d_nlist.data,
+                                                d_head_list.data,
+                                                d_coord.data,
+                                                d_lambda.data,
+                                                d_error.data,
+                                                m_reactive_typeid,
+                                                box,
+                                                params,
+                                                m_tuner_lambda->getParam()[0]);
+    if (err != hipSuccess)
+        {
+        throw std::runtime_error(std::string("ReactiveLJForceComputeGPU lambda kernel launch "
+                                             "failed: ")
+                                 + hipGetErrorString(err));
+        }
     if (m_exec_conf->isCUDAErrorCheckingEnabled())
         {
         CHECK_CUDA_ERROR();
@@ -176,22 +189,28 @@ void ReactiveLJForceComputeGPU::computeForces(uint64_t timestep)
 
     // Pass 3: evaluate forces and optionally the virial tensor.
     m_tuner_force->begin();
-    kernel::gpu_reactivelj_compute_forces(N,
-                                          d_pos.data,
-                                          d_n_neigh.data,
-                                          d_nlist.data,
-                                          d_head_list.data,
-                                          d_coord.data,
-                                          d_lambda.data,
-                                          d_force.data,
-                                          d_virial.data,
-                                          virial_pitch,
-                                          d_error.data,
-                                          m_reactive_typeid,
-                                          box,
-                                          params,
-                                          compute_virial,
-                                          m_tuner_force->getParam()[0]);
+    err = kernel::gpu_reactivelj_compute_forces(N,
+                                                d_pos.data,
+                                                d_n_neigh.data,
+                                                d_nlist.data,
+                                                d_head_list.data,
+                                                d_coord.data,
+                                                d_lambda.data,
+                                                d_force.data,
+                                                d_virial.data,
+                                                virial_pitch,
+                                                d_error.data,
+                                                m_reactive_typeid,
+                                                box,
+                                                params,
+                                                compute_virial,
+                                                m_tuner_force->getParam()[0]);
+    if (err != hipSuccess)
+        {
+        throw std::runtime_error(std::string("ReactiveLJForceComputeGPU force kernel launch "
+                                             "failed: ")
+                                 + hipGetErrorString(err));
+        }
     if (m_exec_conf->isCUDAErrorCheckingEnabled())
         {
         CHECK_CUDA_ERROR();
