@@ -43,6 +43,7 @@ from hoomd.data.parameterdicts import ParameterDict, TypeParameterDict
 from hoomd.data.typeconverter import positive_real
 from hoomd.data.typeparam import TypeParameter
 from hoomd.md import _md
+from hoomd.md import dihedral as _dihedral
 from hoomd.md.force import Force
 import inspect
 
@@ -505,7 +506,44 @@ class SquareDensity(Triplet):
         self._add_typeparam(params)
 
 
+class CBT(_dihedral.CBT):
+    r"""Combined bending-torsion (CBT) dihedral force convenience wrapper.
+
+    Args:
+        dihedral_type (str): Dihedral type to parameterize.
+        k1 (float): First OPLS coefficient.
+        k2 (float): Second OPLS coefficient.
+        k3 (float): Third OPLS coefficient.
+        k4 (float): Fourth OPLS coefficient.
+        angle_exponent (float): Exponent :math:`m` in
+            :math:`[\sin(\theta_1)\sin(\theta_2)]^m`.
+
+    `CBT` is implemented as a compiled dihedral force and exposed in
+    `hoomd.md.many_body` with the same argument pattern as the original Python
+    prototype used in this project.
+    """
+
+    def __init__(
+        self,
+        dihedral_type,
+        k1=0.0,
+        k2=0.0,
+        k3=0.0,
+        k4=0.0,
+        angle_exponent=3.0,
+    ):
+        super().__init__()
+        self.params[dihedral_type] = dict(
+            k1=float(k1),
+            k2=float(k2),
+            k3=float(k3),
+            k4=float(k4),
+            angle_exponent=float(angle_exponent),
+        )
+
+
 __all__ = [
+    "CBT",
     "RevCross",
     "SquareDensity",
     "Tersoff",

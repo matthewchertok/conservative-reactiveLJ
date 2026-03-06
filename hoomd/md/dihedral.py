@@ -271,7 +271,78 @@ class OPLS(Dihedral):
         self._add_typeparam(params)
 
 
+class CBT(Dihedral):
+    r"""Combined bending-torsion (CBT) dihedral force.
+
+    `CBT` computes forces, virials, and energies on all dihedrals in the
+    simulation state with:
+
+    .. math::
+
+        U(\phi, \theta_1, \theta_2) = [\sin(\theta_1)\sin(\theta_2)]^m
+        U_\mathrm{OPLS}(\phi)
+
+    where:
+
+    .. math::
+
+        U_\mathrm{OPLS}(\phi) = \frac{1}{2}k_1 \left( 1 + \cos\left(\phi \right) \right)
+            + \frac{1}{2}k_2 \left( 1 - \cos\left(2 \phi \right) \right)
+            + \frac{1}{2}k_3 \left( 1 + \cos\left(3 \phi \right) \right)
+            + \frac{1}{2}k_4 \left( 1 - \cos\left(4 \phi \right) \right)
+
+    :math:`\theta_1` and :math:`\theta_2` are the two adjacent bend angles in
+    the dihedral quadruplet and :math:`m` is ``angle_exponent``.
+
+    .. rubric:: Example:
+
+    .. code-block:: python
+
+            cbt = hoomd.md.dihedral.CBT()
+            cbt.params["A-A-A-A"] = dict(
+                k1=0.0, k2=-0.604, k3=0.0, k4=-1.789, angle_exponent=3.0
+            )
+
+    {inherited}
+
+    **Members defined in** `CBT`:
+
+    Attributes:
+        params (`TypeParameter` [``dihedral type``, `dict`]):
+            The parameter dictionary has the following keys:
+
+            * ``k1`` (`float`, **required**) - first OPLS coefficient
+            * ``k2`` (`float`, **required**) - second OPLS coefficient
+            * ``k3`` (`float`, **required**) - third OPLS coefficient
+            * ``k4`` (`float`, **required**) - fourth OPLS coefficient
+            * ``angle_exponent`` (`float`, **required**) -
+              :math:`m \ge 0` in the CBT gating term
+    """
+
+    _cpp_class_name = "CBTDihedralForceCompute"
+    __doc__ = inspect.cleandoc(__doc__).replace(
+        "{inherited}", inspect.cleandoc(Dihedral._doc_inherited)
+    )
+
+    def __init__(self):
+        super().__init__()
+        params = TypeParameter(
+            "params",
+            "dihedral_types",
+            TypeParameterDict(
+                k1=float,
+                k2=float,
+                k3=float,
+                k4=float,
+                angle_exponent=hoomd.data.typeconverter.nonnegative_real,
+                len_keys=1,
+            ),
+        )
+        self._add_typeparam(params)
+
+
 __all__ = [
+    "CBT",
     "OPLS",
     "Dihedral",
     "Periodic",

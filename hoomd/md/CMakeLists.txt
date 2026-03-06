@@ -13,6 +13,7 @@ set(_md_sources module-md.cc
                    AlchemyData.cc
                    BendingRigidityMeshForceCompute.cc
                    BondTablePotential.cc
+                   CBTDihedralForceCompute.cc
                    CommunicatorGrid.cc
                    ComputeThermo.cc
                    ComputeThermoHMA.cc
@@ -82,6 +83,10 @@ set(_md_headers ActiveForceComputeGPU.h
                 BendingRigidityMeshForceCompute.h
                 BondTablePotentialGPU.h
                 BondTablePotential.h
+                CBTDihedralForceComputeGPU.h
+                CBTDihedralForceGPU.cuh
+                CBTDihedralForceCompute.h
+                CBTDihedralForceTypes.h
                 CommunicatorGridGPU.h
                 CommunicatorGrid.h
                 ComputeThermoGPU.cuh
@@ -273,6 +278,7 @@ list(APPEND _md_sources ActiveForceComputeGPU.cc
                            AnisoPotentialPairGBGPU.cc
                            BendingRigidityMeshForceComputeGPU.cc
                            BondTablePotentialGPU.cc
+                           CBTDihedralForceComputeGPU.cc
                            CommunicatorGridGPU.cc
                            ComputeThermoGPU.cc
                            ComputeThermoHMAGPU.cc
@@ -318,6 +324,7 @@ set(_md_cu_sources ActiveForceComputeGPU.cu
                       ComputeThermoHMAGPU.cu
                       ConstantForceComputeGPU.cu
                       BondTablePotentialGPU.cu
+                      CBTDihedralForceGPU.cu
                       CommunicatorGridGPU.cu
                       FIREEnergyMinimizerGPU.cu
                       ForceCompositeGPU.cu
