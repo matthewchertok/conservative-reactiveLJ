@@ -7,6 +7,8 @@
 
 #include "CBTTableDihedralForceComputeGPU.h"
 
+#include <algorithm>
+
 using namespace std;
 
 namespace hoomd
@@ -26,7 +28,31 @@ CBTTableDihedralForceComputeGPU::CBTTableDihedralForceComputeGPU(
         throw std::runtime_error("Error initializing CBTTableDihedralForceComputeGPU");
         }
 
-    m_tuner.reset(new Autotuner<1>({AutotunerBase::makeBlockSizeRange(m_exec_conf)},
+    auto block_size_range = AutotunerBase::makeBlockSizeRange(m_exec_conf);
+    unsigned int kernel_max_block_size = 0;
+    const hipError_t err = kernel::gpu_cbt_table_dihedral_get_max_block_size(kernel_max_block_size);
+    if (err != hipSuccess || kernel_max_block_size == 0)
+        {
+        m_exec_conf->msg->warning()
+            << "CBTTableDihedralForceComputeGPU: failed to query max block size for CBT table "
+               "dihedral kernel; using default autotuner range. Error: "
+            << hipGetErrorString(err) << endl;
+        }
+    else
+        {
+        block_size_range.erase(remove_if(block_size_range.begin(),
+                                         block_size_range.end(),
+                                         [kernel_max_block_size](unsigned int block_size)
+                                         { return block_size > kernel_max_block_size; }),
+                               block_size_range.end());
+
+        if (block_size_range.empty())
+            {
+            block_size_range.push_back(kernel_max_block_size);
+            }
+        }
+
+    m_tuner.reset(new Autotuner<1>({block_size_range},
                                    m_exec_conf,
                                    "cbt_table_dihedral"));
     m_autotuners.push_back(m_tuner);
@@ -57,22 +83,29 @@ void CBTTableDihedralForceComputeGPU::computeForces(uint64_t timestep)
                                           access_mode::read);
 
     m_tuner->begin();
-    kernel::gpu_compute_cbt_table_dihedral_forces(d_force.data,
-                                                  d_virial.data,
-                                                  m_virial.getPitch(),
-                                                  m_pdata->getN(),
-                                                  d_pos.data,
-                                                  box,
-                                                  d_gpu_dihedral_list.data,
-                                                  d_dihedrals_ABCD.data,
-                                                  m_dihedral_data->getGPUTableIndexer().getW(),
-                                                  d_n_dihedrals.data,
-                                                  d_tables.data,
-                                                  m_table_width,
-                                                  m_table_value,
-                                                  d_angle_exponents.data,
-                                                  m_tuner->getParam()[0],
-                                                  m_exec_conf->dev_prop.warpSize);
+    const hipError_t err = kernel::gpu_compute_cbt_table_dihedral_forces(d_force.data,
+                                                                          d_virial.data,
+                                                                          m_virial.getPitch(),
+                                                                          m_pdata->getN(),
+                                                                          d_pos.data,
+                                                                          box,
+                                                                          d_gpu_dihedral_list.data,
+                                                                          d_dihedrals_ABCD.data,
+                                                                          m_dihedral_data
+                                                                              ->getGPUTableIndexer()
+                                                                              .getW(),
+                                                                          d_n_dihedrals.data,
+                                                                          d_tables.data,
+                                                                          m_table_width,
+                                                                          m_table_value,
+                                                                          d_angle_exponents.data,
+                                                                          m_tuner->getParam()[0]);
+    if (err != hipSuccess)
+        {
+        throw std::runtime_error(std::string("CBTTableDihedralForceComputeGPU kernel launch "
+                                             "failed: ")
+                                 + hipGetErrorString(err));
+        }
     if (m_exec_conf->isCUDAErrorCheckingEnabled())
         CHECK_CUDA_ERROR();
     m_tuner->end();

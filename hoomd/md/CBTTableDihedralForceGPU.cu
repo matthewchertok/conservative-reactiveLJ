@@ -5,7 +5,10 @@
 
 #include "CBTTableDihedralForceGPU.cuh"
 
+#include <algorithm>
 #include <assert.h>
+#include <mutex>
+#include <unordered_map>
 
 namespace hoomd
     {
@@ -15,6 +18,45 @@ namespace kernel
     {
 namespace
     {
+hipError_t getCachedMaxThreadsPerBlock(const void* kernel_ptr,
+                                       std::unordered_map<int, unsigned int>& cache,
+                                       std::mutex& cache_mutex,
+                                       unsigned int& max_threads_per_block)
+    {
+    int device = -1;
+    hipError_t err = hipGetDevice(&device);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
+
+    {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(device);
+    if (it != cache.end())
+        {
+        max_threads_per_block = it->second;
+        return hipSuccess;
+        }
+    }
+
+    hipFuncAttributes attr;
+    err = hipFuncGetAttributes(&attr, kernel_ptr);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
+
+    max_threads_per_block = static_cast<unsigned int>(attr.maxThreadsPerBlock);
+
+    {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    cache.emplace(device, max_threads_per_block);
+    }
+
+    return hipSuccess;
+    }
+
 __device__ inline Scalar3 cross3(const Scalar3& a, const Scalar3& b)
     {
     return make_scalar3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
@@ -332,6 +374,16 @@ __global__ void gpu_compute_cbt_table_dihedral_forces_kernel(Scalar4* d_force,
         d_virial[k * virial_pitch + idx] = virial_idx[k];
     }
 
+hipError_t gpu_cbt_table_dihedral_get_max_block_size(unsigned int& max_block_size)
+    {
+    static std::mutex cache_mutex;
+    static std::unordered_map<int, unsigned int> max_threads_cache;
+    return getCachedMaxThreadsPerBlock((const void*)gpu_compute_cbt_table_dihedral_forces_kernel,
+                                       max_threads_cache,
+                                       cache_mutex,
+                                       max_block_size);
+    }
+
 hipError_t gpu_compute_cbt_table_dihedral_forces(Scalar4* d_force,
                                                  Scalar* d_virial,
                                                  const size_t virial_pitch,
@@ -346,25 +398,31 @@ hipError_t gpu_compute_cbt_table_dihedral_forces(Scalar4* d_force,
                                                  const unsigned int table_width,
                                                  const Index2D& table_value,
                                                  const Scalar* d_angle_exponents,
-                                                 const int block_size,
-                                                 const int warp_size)
+                                                 const unsigned int block_size)
     {
     assert(d_tables);
     assert(d_angle_exponents);
     assert(table_width > 1);
 
-    unsigned int max_block_size;
-    hipFuncAttributes attr;
-    hipFuncGetAttributes(&attr, (const void*)gpu_compute_cbt_table_dihedral_forces_kernel);
-    max_block_size = attr.maxThreadsPerBlock;
-    if (max_block_size % warp_size)
+    if (N == 0)
         {
-        max_block_size = (max_block_size / warp_size - 1) * warp_size;
+        return hipSuccess;
         }
 
-    unsigned int run_block_size = min(block_size, max_block_size);
+    unsigned int max_block_size = 0;
+    hipError_t err = gpu_cbt_table_dihedral_get_max_block_size(max_block_size);
+    if (err != hipSuccess)
+        {
+        return err;
+        }
 
-    dim3 grid(N / run_block_size + 1, 1, 1);
+    const unsigned int run_block_size = std::min(block_size, max_block_size);
+    if (run_block_size == 0)
+        {
+        return hipErrorInvalidConfiguration;
+        }
+
+    dim3 grid((N + run_block_size - 1) / run_block_size, 1, 1);
     dim3 threads(run_block_size, 1, 1);
 
     hipLaunchKernelGGL((gpu_compute_cbt_table_dihedral_forces_kernel),
@@ -387,7 +445,7 @@ hipError_t gpu_compute_cbt_table_dihedral_forces(Scalar4* d_force,
                        table_value,
                        d_angle_exponents);
 
-    return hipSuccess;
+    return hipGetLastError();
     }
 
     } // end namespace kernel

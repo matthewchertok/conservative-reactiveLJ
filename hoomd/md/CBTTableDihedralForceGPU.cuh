@@ -20,6 +20,8 @@ namespace md
     {
 namespace kernel
     {
+hipError_t gpu_cbt_table_dihedral_get_max_block_size(unsigned int& max_block_size);
+
 hipError_t gpu_compute_cbt_table_dihedral_forces(Scalar4* d_force,
                                                  Scalar* d_virial,
                                                  const size_t virial_pitch,
@@ -34,8 +36,7 @@ hipError_t gpu_compute_cbt_table_dihedral_forces(Scalar4* d_force,
                                                  const unsigned int table_width,
                                                  const Index2D& table_value,
                                                  const Scalar* d_angle_exponents,
-                                                 const int block_size,
-                                                 const int warp_size);
+                                                 const unsigned int block_size);
     } // end namespace kernel
     } // end namespace md
     } // end namespace hoomd
