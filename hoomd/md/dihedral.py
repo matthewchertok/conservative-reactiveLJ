@@ -271,6 +271,76 @@ class OPLS(Dihedral):
         self._add_typeparam(params)
 
 
+class CBTTable(Dihedral):
+    r"""Tabulated combined bending-torsion (CBT) dihedral force.
+
+    Args:
+        width (int): Number of points in the torsion table.
+
+    `CBTTable` computes forces, virials, and energies on all dihedrals in the
+    simulation state with:
+
+    .. math::
+
+        U(\phi, \theta_1, \theta_2) = [\sin(\theta_1)\sin(\theta_2)]^m
+        U_\mathrm{table}(\phi)
+
+    where :math:`\theta_1` and :math:`\theta_2` are the two adjacent bend
+    angles in the dihedral quadruplet and :math:`m` is ``angle_exponent``.
+    Provide the torsional energy :math:`U_\mathrm{table}(\phi)` and torque
+    :math:`\tau_\mathrm{table}(\phi)` on evenly spaced grid points over
+    :math:`\phi \in [-\pi,\pi]`, where
+    :math:`\tau_\mathrm{table} = -\partial U_\mathrm{table}/\partial \phi`.
+
+    {inherited}
+
+    **Members defined in** `CBTTable`:
+
+    Attributes:
+        params (`TypeParameter` [``dihedral type``, `dict`]):
+            The parameter dictionary has the following keys:
+
+            * ``U`` ((*width*,) `numpy.ndarray` of `float`, **required**) -
+              the tabulated torsional energy values.
+            * ``tau`` ((*width*,) `numpy.ndarray` of `float`, **required**) -
+              the tabulated torsional torque values.
+            * ``angle_exponent`` (`float`, **required**) -
+              :math:`m \ge 0` in the CBT gating term.
+
+        width (int): Number of points in the torsion table.
+    """
+
+    __doc__ = inspect.cleandoc(__doc__).replace(
+        "{inherited}", inspect.cleandoc(Dihedral._doc_inherited)
+    )
+
+    def __init__(self, width):
+        super().__init__()
+        param_dict = hoomd.data.parameterdicts.ParameterDict(width=int)
+        param_dict["width"] = width
+        self._param_dict = param_dict
+
+        params = TypeParameter(
+            "params",
+            "dihedral_types",
+            TypeParameterDict(
+                U=hoomd.data.typeconverter.NDArrayValidator(numpy.float64),
+                tau=hoomd.data.typeconverter.NDArrayValidator(numpy.float64),
+                angle_exponent=hoomd.data.typeconverter.nonnegative_real,
+                len_keys=1,
+            ),
+        )
+        self._add_typeparam(params)
+
+    def _attach_hook(self):
+        if isinstance(self._simulation.device, hoomd.device.CPU):
+            cpp_cls = _md.CBTTableDihedralForceCompute
+        else:
+            cpp_cls = _md.CBTTableDihedralForceComputeGPU
+
+        self._cpp_obj = cpp_cls(self._simulation.state._cpp_sys_def, self.width)
+
+
 class CBT(Dihedral):
     r"""Combined bending-torsion (CBT) dihedral force.
 
@@ -343,6 +413,7 @@ class CBT(Dihedral):
 
 __all__ = [
     "CBT",
+    "CBTTable",
     "OPLS",
     "Dihedral",
     "Periodic",

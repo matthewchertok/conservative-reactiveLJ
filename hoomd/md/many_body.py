@@ -542,8 +542,36 @@ class CBT(_dihedral.CBT):
         )
 
 
+class CBTTable(_dihedral.CBTTable):
+    r"""Tabulated combined bending-torsion (CBT) dihedral convenience wrapper.
+
+    Args:
+        dihedral_type (str): Dihedral type to parameterize.
+        U (Sequence[float]): Tabulated torsional energy values on
+            :math:`\phi \in [-\pi,\pi]`.
+        tau (Sequence[float]): Tabulated torsional torque values on the same
+            grid, with :math:`\tau = -\partial U/\partial \phi`.
+        angle_exponent (float): Exponent :math:`m` in
+            :math:`[\sin(\theta_1)\sin(\theta_2)]^m`.
+    """
+
+    def __init__(self, dihedral_type, U, tau, angle_exponent=3.0):
+        if len(U) != len(tau):
+            raise ValueError("CBTTable requires U and tau arrays of the same length.")
+        if len(U) < 2:
+            raise ValueError("CBTTable requires at least two tabulated points.")
+
+        super().__init__(len(U))
+        self.params[dihedral_type] = dict(
+            U=U,
+            tau=tau,
+            angle_exponent=float(angle_exponent),
+        )
+
+
 __all__ = [
     "CBT",
+    "CBTTable",
     "RevCross",
     "SquareDensity",
     "Tersoff",
