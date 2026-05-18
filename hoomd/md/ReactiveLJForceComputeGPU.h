@@ -44,11 +44,9 @@ class PYBIND11_EXPORT ReactiveLJForceComputeGPU : public ReactiveLJForceCompute
     // We keep three autotuners because the implementation is split into
     // three kernels (coordination, lambda, and force accumulation), and each
     // kernel has a different occupancy / memory profile.
-    std::shared_ptr<Autotuner<1>> m_tuner_coord;
-    std::shared_ptr<Autotuner<1>> m_tuner_lambda;
-    std::shared_ptr<Autotuner<1>> m_tuner_force;
-    // Device-side error code used by smoothing-bound checks.
-    GPUArray<unsigned int> m_error_flag;
+    std::shared_ptr<Autotuner<2>> m_tuner_coord;
+    std::shared_ptr<Autotuner<2>> m_tuner_lambda;
+    std::shared_ptr<Autotuner<2>> m_tuner_force;
     };
 
 namespace detail

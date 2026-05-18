@@ -57,6 +57,20 @@ class PYBIND11_EXPORT ReactiveLJForceCompute : public ForceCompute
 
     const std::string& getReactiveType() const;
 
+    /// Start autotuning this force and its neighbor list.
+    void startAutotuning() override
+        {
+        ForceCompute::startAutotuning();
+        m_nlist->startAutotuning();
+        }
+
+    /// Check if autotuning is complete for this force and its neighbor list.
+    bool isAutotuningComplete() override
+        {
+        bool result = ForceCompute::isAutotuningComplete();
+        return result && m_nlist->isAutotuningComplete();
+        }
+
     protected:
     void computeForces(uint64_t timestep) override;
     void ensureScratchSize();
@@ -76,25 +90,41 @@ class PYBIND11_EXPORT ReactiveLJForceCompute : public ForceCompute
     Scalar m_r_cut;
     Scalar m_r_cut_sq;
     Scalar m_neighbor_rcut;
+    Scalar m_neighbor_rcut_sq;
     Scalar m_energy_shift;
     Scalar m_weakening_inner;
     Scalar m_weakening_outer;
     Scalar m_weakening_exponent;
+    unsigned int m_weakening_exponent_int;
     Scalar m_inverse_span;
+    Scalar m_pi_inverse_span;
     Scalar m_r_elbow;
     bool m_smooth_elbow;
     Scalar m_smooth_kappa;
     Scalar m_smooth_beta;
+    bool m_smooth_beta_is_one;
+    Scalar m_smooth_kappa_sigma;
     Scalar m_smooth_delta_tol;
     Scalar m_smooth_r_min;
+    Scalar m_lj_energy12;
+    Scalar m_lj_energy6;
+    Scalar m_lj_force12;
+    Scalar m_lj_force6;
+    Scalar m_lj_force_deriv12;
+    Scalar m_lj_force_deriv6;
 
     private:
     void setReactiveType(const std::string& reactive_type);
     void updateNeighborListCutoffs();
+    void validateSmoothingBounds() const;
     Scalar computeWeight(Scalar distance) const;
+    void computeWeightAndDerivative(Scalar distance, Scalar& weight, Scalar& dw_dr) const;
     Scalar evaluateEnergy(Scalar distance) const;
     Scalar evaluateForceMagnitude(Scalar distance) const;
     inline void evaluateCexcSmooth(Scalar raw, Scalar& C_exc, Scalar& gate) const;
+    inline Scalar evaluateWeakening(Scalar C_exc) const;
+    inline Scalar evaluateSmoothDelta(Scalar weakening) const;
+    inline Scalar evaluateSmoothDeltaDerivative(Scalar weakening) const;
     inline Scalar evaluateForceDerivative(Scalar distance) const;
     Scalar evaluate_dU_dCexc(Scalar r_in, Scalar C_exc) const;
     Scalar evaluateWeightDerivative(Scalar distance) const;

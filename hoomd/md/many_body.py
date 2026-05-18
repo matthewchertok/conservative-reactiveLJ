@@ -599,6 +599,8 @@ class ReactiveLJ(Force):
 
         if weakening_outer <= weakening_inner:
             raise ValueError("weakening_outer must be greater than weakening_inner")
+        if weakening_outer > r_cut:
+            raise ValueError("weakening_outer must be less than or equal to r_cut")
 
         weakening_exponent = self.weakening_exponent
         smooth_elbow = self.smooth_elbow

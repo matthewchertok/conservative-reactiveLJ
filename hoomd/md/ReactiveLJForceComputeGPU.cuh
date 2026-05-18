@@ -17,6 +17,14 @@ namespace md
     {
 namespace kernel
     {
+#if defined(__HIP_PLATFORM_NVCC__)
+const int gpu_reactivelj_max_tpp = 32;
+#elif defined(__HIP_PLATFORM_HCC__) || defined(__HIP_PLATFORM_AMD__)
+const int gpu_reactivelj_max_tpp = 64;
+#else
+const int gpu_reactivelj_max_tpp = 32;
+#endif
+
 
 struct reactive_lj_params
     {
@@ -31,13 +39,23 @@ struct reactive_lj_params
     Scalar weakening_inner;
     Scalar weakening_outer;
     Scalar weakening_exponent;
+    unsigned int weakening_exponent_int;
     Scalar inverse_span;
+    Scalar pi_inverse_span;
     Scalar r_elbow;
     bool smooth_elbow;
     Scalar smooth_kappa;
     Scalar smooth_beta;
+    unsigned int smooth_beta_is_one;
+    Scalar smooth_kappa_sigma;
     Scalar smooth_delta_tol;
     Scalar smooth_r_min;
+    Scalar lj_energy12;
+    Scalar lj_energy6;
+    Scalar lj_force12;
+    Scalar lj_force6;
+    Scalar lj_force_deriv12;
+    Scalar lj_force_deriv6;
     };
 
 //! Query max block size for the coordination kernel on the active device.
@@ -59,7 +77,8 @@ hipError_t gpu_reactivelj_compute_coordination(const unsigned int N,
                                                unsigned int reactive_typeid,
                                                BoxDim box,
                                                reactive_lj_params params,
-                                               unsigned int block_size);
+                                               unsigned int block_size,
+                                               unsigned int threads_per_particle);
 
 // Pass 2: lambda accumulation with pair-once endpoint updates.
 hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
@@ -69,11 +88,11 @@ hipError_t gpu_reactivelj_compute_lambda(const unsigned int N,
                                          const size_t* d_head_list,
                                          const Scalar* d_coord,
                                          Scalar* d_lambda,
-                                         unsigned int* d_error_flag,
                                          unsigned int reactive_typeid,
                                          BoxDim box,
                                          reactive_lj_params params,
-                                         unsigned int block_size);
+                                         unsigned int block_size,
+                                         unsigned int threads_per_particle);
 
 // Pass 3: pair + coordination force evaluation, with optional virial.
 hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
@@ -86,12 +105,12 @@ hipError_t gpu_reactivelj_compute_forces(const unsigned int N,
                                          Scalar4* d_force,
                                          Scalar* d_virial,
                                          const size_t virial_pitch,
-                                         unsigned int* d_error_flag,
                                          unsigned int reactive_typeid,
                                          BoxDim box,
                                          reactive_lj_params params,
                                          unsigned int compute_virial,
-                                         unsigned int block_size);
+                                         unsigned int block_size,
+                                         unsigned int threads_per_particle);
 
     } // namespace kernel
     } // namespace md

@@ -12,6 +12,67 @@ namespace hoomd
     {
 namespace md
     {
+namespace
+    {
+unsigned int detectIntegerOneToNine(Scalar value)
+    {
+    for (unsigned int i = 1; i <= 9; ++i)
+        {
+        if (value == Scalar(i))
+            {
+            return i;
+            }
+        }
+    return 0;
+    }
+
+inline Scalar powIntegerOneToNine(Scalar base, unsigned int exponent)
+    {
+    switch (exponent)
+        {
+    case 1:
+        return base;
+    case 2:
+        return base * base;
+    case 3:
+        return base * base * base;
+    case 4:
+        {
+        const Scalar base2 = base * base;
+        return base2 * base2;
+        }
+    case 5:
+        {
+        const Scalar base2 = base * base;
+        return base2 * base2 * base;
+        }
+    case 6:
+        {
+        const Scalar base2 = base * base;
+        return base2 * base2 * base2;
+        }
+    case 7:
+        {
+        const Scalar base2 = base * base;
+        return base2 * base2 * base2 * base;
+        }
+    case 8:
+        {
+        const Scalar base2 = base * base;
+        const Scalar base4 = base2 * base2;
+        return base4 * base4;
+        }
+    case 9:
+        {
+        const Scalar base2 = base * base;
+        const Scalar base4 = base2 * base2;
+        return base4 * base4 * base;
+        }
+    default:
+        return slow::pow(base, Scalar(exponent));
+        }
+    }
+    } // namespace
 
 ReactiveLJForceCompute::ReactiveLJForceCompute(std::shared_ptr<SystemDefinition> sysdef,
                                                std::shared_ptr<NeighborList> nlist,
@@ -28,10 +89,16 @@ ReactiveLJForceCompute::ReactiveLJForceCompute(std::shared_ptr<SystemDefinition>
     : ForceCompute(sysdef), m_nlist(std::move(nlist)), m_typpair_idx(m_pdata->getNTypes()),
       m_matrix_registered(false), m_reactive_typeid(0), m_sigma(Scalar(1.0)), m_epsilon(Scalar(1.0)),
       m_r_cut(Scalar(1.0)), m_r_cut_sq(Scalar(1.0)), m_neighbor_rcut(Scalar(1.0)),
-      m_energy_shift(Scalar(0.0)), m_weakening_inner(Scalar(1.0)), m_weakening_outer(Scalar(1.0)),
-      m_weakening_exponent(Scalar(1.0)), m_inverse_span(Scalar(1.0)), m_r_elbow(Scalar(1.0)),
+      m_neighbor_rcut_sq(Scalar(1.0)), m_energy_shift(Scalar(0.0)),
+      m_weakening_inner(Scalar(1.0)), m_weakening_outer(Scalar(1.0)),
+      m_weakening_exponent(Scalar(1.0)), m_weakening_exponent_int(1),
+      m_inverse_span(Scalar(1.0)), m_pi_inverse_span(Scalar(1.0)), m_r_elbow(Scalar(1.0)),
       m_smooth_elbow(smooth_elbow), m_smooth_kappa(smooth_kappa), m_smooth_beta(smooth_beta),
-      m_smooth_delta_tol(Scalar(0.0)), m_smooth_r_min(Scalar(0.0))
+      m_smooth_beta_is_one(smooth_beta == Scalar(1.0)), m_smooth_kappa_sigma(Scalar(0.05)),
+      m_smooth_delta_tol(Scalar(0.0)), m_smooth_r_min(Scalar(0.0)),
+      m_lj_energy12(Scalar(4.0)), m_lj_energy6(Scalar(4.0)), m_lj_force12(Scalar(48.0)),
+      m_lj_force6(Scalar(24.0)), m_lj_force_deriv12(Scalar(-624.0)),
+      m_lj_force_deriv6(Scalar(168.0))
     {
     if (!m_nlist)
         {
@@ -112,6 +179,9 @@ void ReactiveLJForceCompute::setParameters(Scalar sigma,
     if (weakening_outer <= weakening_inner)
         throw std::invalid_argument(
             "weakening_outer must be greater than weakening_inner for a valid taper window");
+    if (weakening_outer > r_cut)
+        throw std::invalid_argument(
+            "weakening_outer must be less than or equal to r_cut for ReactiveLJ");
     if (smooth_kappa < Scalar(0.0))
         throw std::invalid_argument("smooth_kappa must be non-negative");
     if (smooth_beta <= Scalar(0.0))
@@ -124,13 +194,30 @@ void ReactiveLJForceCompute::setParameters(Scalar sigma,
     m_weakening_inner = weakening_inner;
     m_weakening_outer = weakening_outer;
     m_weakening_exponent = weakening_exponent;
+    m_weakening_exponent_int = detectIntegerOneToNine(m_weakening_exponent);
     m_inverse_span = Scalar(1.0) / (m_weakening_outer - m_weakening_inner);
+    const Scalar pi = Scalar(3.141592653589793238462643383279502884L);
+    m_pi_inverse_span = pi * m_inverse_span;
     m_smooth_elbow = smooth_elbow;
     m_smooth_kappa = smooth_kappa;
     m_smooth_beta = smooth_beta;
+    m_smooth_beta_is_one = (m_smooth_beta == Scalar(1.0));
+    m_smooth_kappa_sigma = m_smooth_kappa * m_sigma;
 
-    Scalar sigma_over_rcut = m_sigma / m_r_cut;
-    Scalar sigma_over_rcut_6 = slow::pow(sigma_over_rcut, Scalar(6.0));
+    const Scalar sigma2 = m_sigma * m_sigma;
+    const Scalar sigma6 = sigma2 * sigma2 * sigma2;
+    const Scalar sigma12 = sigma6 * sigma6;
+    m_lj_energy12 = Scalar(4.0) * m_epsilon * sigma12;
+    m_lj_energy6 = Scalar(4.0) * m_epsilon * sigma6;
+    m_lj_force12 = Scalar(48.0) * m_epsilon * sigma12;
+    m_lj_force6 = Scalar(24.0) * m_epsilon * sigma6;
+    m_lj_force_deriv12 = Scalar(-624.0) * m_epsilon * sigma12;
+    m_lj_force_deriv6 = Scalar(168.0) * m_epsilon * sigma6;
+
+    const Scalar inv_rcut = Scalar(1.0) / m_r_cut;
+    const Scalar inv_rcut2 = inv_rcut * inv_rcut;
+    const Scalar inv_rcut6 = inv_rcut2 * inv_rcut2 * inv_rcut2;
+    Scalar sigma_over_rcut_6 = sigma6 * inv_rcut6;
     m_energy_shift = Scalar(4.0) * m_epsilon
                      * (sigma_over_rcut_6 * sigma_over_rcut_6 - sigma_over_rcut_6);
 
@@ -147,8 +234,10 @@ void ReactiveLJForceCompute::setParameters(Scalar sigma,
 
     m_smooth_delta_tol = Scalar(1e-6) * m_sigma;
     m_smooth_r_min = Scalar(1e-7) * m_sigma;
+    validateSmoothingBounds();
 
     m_neighbor_rcut = std::max(m_r_cut, m_weakening_outer);
+    m_neighbor_rcut_sq = m_neighbor_rcut * m_neighbor_rcut;
     updateNeighborListCutoffs();
     }
 
@@ -178,6 +267,34 @@ const std::string& ReactiveLJForceCompute::getReactiveType() const
     return m_reactive_type_name;
     }
 
+void ReactiveLJForceCompute::validateSmoothingBounds() const
+    {
+    if (!m_smooth_elbow || m_smooth_kappa_sigma <= Scalar(0.0)
+        || m_weakening_exponent <= Scalar(0.0))
+        {
+        return;
+        }
+
+    const Scalar max_delta = m_smooth_kappa_sigma;
+    if (max_delta <= m_smooth_delta_tol)
+        {
+        return;
+        }
+
+    if (m_r_elbow - max_delta <= m_smooth_r_min)
+        {
+        throw std::invalid_argument(
+            "ReactiveLJForceCompute: r_elbow - max_delta must be greater than r_min; "
+            "decrease smooth_kappa or decrease r_min.");
+        }
+    if (m_r_elbow + max_delta >= m_r_cut)
+        {
+        throw std::invalid_argument(
+            "ReactiveLJForceCompute: r_elbow + max_delta must be less than r_cut; "
+            "decrease smooth_kappa or increase r_cut.");
+        }
+    }
+
 /*! \brief Smooth positive-part for C_exc and its derivative.
  *
  *  We replace C_exc = max(raw, 0) with a C1-smooth approximation:
@@ -205,6 +322,46 @@ inline void ReactiveLJForceCompute::evaluateCexcSmooth(Scalar raw,
     gate = Scalar(0.5) * (Scalar(1.0) + raw / s);
     }
 
+inline Scalar ReactiveLJForceCompute::evaluateWeakening(Scalar C_exc) const
+    {
+    if (m_weakening_exponent == Scalar(0.0))
+        {
+        return Scalar(1.0);
+        }
+
+    const Scalar inv_coord = Scalar(1.0) / (Scalar(1.0) + C_exc);
+    if (m_weakening_exponent_int != 0)
+        {
+        return powIntegerOneToNine(inv_coord, m_weakening_exponent_int);
+        }
+    return slow::pow(Scalar(1.0) + C_exc, -m_weakening_exponent);
+    }
+
+inline Scalar ReactiveLJForceCompute::evaluateSmoothDelta(Scalar weakening) const
+    {
+    const Scalar one_minus_w = std::max(Scalar(0.0), Scalar(1.0) - weakening);
+    if (m_smooth_beta_is_one)
+        {
+        return m_smooth_kappa_sigma * one_minus_w;
+        }
+    return m_smooth_kappa_sigma * slow::pow(one_minus_w, m_smooth_beta);
+    }
+
+inline Scalar ReactiveLJForceCompute::evaluateSmoothDeltaDerivative(Scalar weakening) const
+    {
+    const Scalar one_minus_w = std::max(Scalar(0.0), Scalar(1.0) - weakening);
+    if (m_smooth_beta_is_one)
+        {
+        return -m_smooth_kappa_sigma;
+        }
+    if (one_minus_w > Scalar(0.0))
+        {
+        return -m_smooth_kappa_sigma * m_smooth_beta
+               * slow::pow(one_minus_w, m_smooth_beta - Scalar(1.0));
+        }
+    return Scalar(0.0);
+    }
+
 /*! \brief Compute dF/dr for the shifted LJ force F(r) = 24 eps / r [2 (sigma/r)^12 - (sigma/r)^6].
  *
  *  evaluateForceMagnitude(r) returns F(r) (signed), despite the name.
@@ -214,14 +371,10 @@ inline Scalar ReactiveLJForceCompute::evaluateForceDerivative(Scalar distance) c
     const Scalar r = std::max(distance, m_smooth_r_min);
     const Scalar inv_r = Scalar(1.0) / r;
     const Scalar inv_r2 = inv_r * inv_r;
+    const Scalar inv_r6 = inv_r2 * inv_r2 * inv_r2;
+    const Scalar inv_r12 = inv_r6 * inv_r6;
 
-    const Scalar sr = m_sigma * inv_r;
-    const Scalar sr2 = sr * sr;
-    const Scalar sr6 = sr2 * sr2 * sr2;
-    const Scalar sr12 = sr6 * sr6;
-
-    // dF/dr = 24 eps * inv_r^2 * ( -26 sr12 + 7 sr6 )
-    return Scalar(24.0) * m_epsilon * inv_r2 * (Scalar(-26.0) * sr12 + Scalar(7.0) * sr6);
+    return m_lj_force_deriv12 * inv_r12 * inv_r2 + m_lj_force_deriv6 * inv_r6 * inv_r2;
     }
 
 /*! \brief Compute dU_ij/dC_exc at fixed r, using a fully analytic expression everywhere.
@@ -247,7 +400,7 @@ Scalar ReactiveLJForceCompute::evaluate_dU_dCexc(Scalar r_in, Scalar C_exc) cons
     const Scalar r = std::max(r_in, m_smooth_r_min);
 
     // W(Cexc) = (1 + Cexc)^(-p); C_exc >= 0 so W is already in (0, 1].
-    const Scalar W = slow::pow(Scalar(1.0) + C_exc, -m_weakening_exponent);
+    const Scalar W = evaluateWeakening(C_exc);
 
     // dW/dCexc = -p * W / (1 + Cexc)
     Scalar dW_dC = Scalar(0.0);
@@ -266,24 +419,10 @@ Scalar ReactiveLJForceCompute::evaluate_dU_dCexc(Scalar r_in, Scalar C_exc) cons
 
     if (m_smooth_elbow)
         {
-        const Scalar one_minus_W = std::max(Scalar(0.0), Scalar(1.0) - W);
-        delta = m_smooth_kappa * m_sigma * slow::pow(one_minus_W, m_smooth_beta);
+        delta = evaluateSmoothDelta(W);
 
         r1 = m_r_elbow - delta;
         r2 = m_r_elbow + delta;
-
-        if (r1 <= m_smooth_r_min)
-            {
-            throw std::invalid_argument(
-                "ReactiveLJForceCompute: r_elbow - delta must be greater than r_min; "
-                "decrease delta or decrease r_min.");
-            }
-        if (r2 >= m_r_cut)
-            {
-            throw std::invalid_argument(
-                "ReactiveLJForceCompute: r_elbow + delta must be less than r_cut; "
-                "decrease delta or increase r_cut.");
-            }
 
         L = r2 - r1;
 
@@ -309,16 +448,7 @@ Scalar ReactiveLJForceCompute::evaluate_dU_dCexc(Scalar r_in, Scalar C_exc) cons
 
     // delta(W) = kappa * sigma * (1 - W)^beta
     // ddelta/dW = -kappa * sigma * beta * (1 - W)^(beta - 1)
-    const Scalar one_minus_W = std::max(Scalar(0.0), Scalar(1.0) - W);
-
-    // If one_minus_W is tiny, delta is tiny and we wouldn't be in smoothing_active.
-    // Still, guard against beta < 1 numerical blowups.
-    Scalar ddelta_dW = Scalar(0.0);
-    if (one_minus_W > Scalar(0.0))
-        {
-        ddelta_dW = -m_smooth_kappa * m_sigma * m_smooth_beta
-                    * slow::pow(one_minus_W, m_smooth_beta - Scalar(1.0));
-        }
+    const Scalar ddelta_dW = evaluateSmoothDeltaDerivative(W);
 
     // r1 = r_elbow - delta, r2 = r_elbow + delta
     const Scalar dr1_dW = -ddelta_dW;
@@ -412,12 +542,14 @@ Scalar ReactiveLJForceCompute::evaluateWeightDerivative(Scalar distance) const
         return Scalar(0.0);
         }
 
-    const Scalar pi = Scalar(3.141592653589793238462643383279502884L);
     const Scalar fraction = (distance - m_weakening_inner) * m_inverse_span;
-    const Scalar angle = pi * fraction;
+    Scalar sin_fraction = Scalar(0.0);
+    Scalar cos_fraction = Scalar(0.0);
+    fast::sincospi(fraction, sin_fraction, cos_fraction);
+    (void)cos_fraction;
 
     // w'(r) = -0.5 * sin(angle) * (pi * m_inverse_span)
-    return -Scalar(0.5) * slow::sin(angle) * (pi * m_inverse_span);
+    return -Scalar(0.5) * sin_fraction * m_pi_inverse_span;
     }
 
 void ReactiveLJForceCompute::computeForces(uint64_t timestep)
@@ -460,7 +592,7 @@ void ReactiveLJForceCompute::computeForces(uint64_t timestep)
     std::fill_n(h_lambda.data, m_lambda.getNumElements(), Scalar(0.0));
 
     unsigned int reactive_count = 0;
-    const Scalar neighbor_cut_sq = m_neighbor_rcut * m_neighbor_rcut;
+    const Scalar neighbor_cut_sq = m_neighbor_rcut_sq;
 
     // -------------------------------------------------------------------------
     // PASS 1: Compute local coordination C_i = sum_k w(r_ik) for reactive beads.
@@ -689,12 +821,28 @@ void ReactiveLJForceCompute::computeForces(uint64_t timestep)
                 r = small_r;
                 }
 
+            const bool in_pair = rsq < m_r_cut_sq;
+            const bool in_coord_window = r > m_weakening_inner && r < m_weakening_outer;
+            if (!in_pair && !in_coord_window)
+                {
+                continue;
+                }
+
             // Initialize pair energy/force as zero; only nonzero when rsq < r_cut^2.
             Scalar pair_energy = Scalar(0.0);
             Scalar force_divr = Scalar(0.0); // pair-only contribution
 
             // Leave-one-out crowding for this pair (used for both pair and coordination terms).
-            const Scalar weight = computeWeight(r);
+            Scalar weight = Scalar(0.0);
+            Scalar dw_dr = Scalar(0.0);
+            if (in_coord_window)
+                {
+                computeWeightAndDerivative(r, weight, dw_dr);
+                }
+            else if (r < m_weakening_outer)
+                {
+                weight = computeWeight(r);
+                }
             const Scalar coordination_j = h_coord.data[j];
             const Scalar raw = (coordination_i - weight) + (coordination_j - weight);
 
@@ -705,22 +853,18 @@ void ReactiveLJForceCompute::computeForces(uint64_t timestep)
             // -----------------------------
             // Pair term: only for r < r_cut
             // -----------------------------
-            if (rsq < m_r_cut_sq)
+            if (in_pair)
                 {
                 // No clamp needed: C_exc >= 0
-                const Scalar weakening
-                    = slow::pow(Scalar(1.0) + C_exc, -m_weakening_exponent);
+                const Scalar weakening = evaluateWeakening(C_exc);
 
-                const Scalar inv_r = Scalar(1.0) / r;
                 const Scalar rsq_safe = std::max(rsq, small_r_sq);
                 const Scalar r2inv = Scalar(1.0) / rsq_safe;
-                const Scalar sr = m_sigma * inv_r;
-                const Scalar sr2 = sr * sr;
-                const Scalar sr6 = sr2 * sr2 * sr2;
-                const Scalar sr12 = sr6 * sr6;
+                const Scalar r6inv = r2inv * r2inv * r2inv;
+                const Scalar r12inv = r6inv * r6inv;
 
-                const Scalar base_energy
-                    = Scalar(4.0) * m_epsilon * (sr12 - sr6) - m_energy_shift;
+                const Scalar base_energy = m_lj_energy12 * r12inv - m_lj_energy6 * r6inv
+                                           - m_energy_shift;
                 const Scalar repulsive_energy = std::max(base_energy, Scalar(0.0));
                 const Scalar attractive_energy = std::min(base_energy, Scalar(0.0));
                 pair_energy = repulsive_energy + weakening * attractive_energy;
@@ -729,29 +873,15 @@ void ReactiveLJForceCompute::computeForces(uint64_t timestep)
                 // (Chain-rule contributions via C_i are handled separately by the coordination-force term.)
                 const Scalar force_scale = (base_energy <= Scalar(0.0)) ? weakening : Scalar(1.0);
                 const Scalar base_force_divr
-                    = Scalar(24.0) * m_epsilon * (Scalar(2.0) * sr12 - sr6) * r2inv;
+                    = m_lj_force12 * r12inv * r2inv - m_lj_force6 * r6inv * r2inv;
                 force_divr = force_scale * base_force_divr;
 
                 // Hermite elbow smoothing modifies both pair_energy and pair force_divr.
                 if (m_smooth_elbow)
                     {
-                    const Scalar one_minus_w = std::max(Scalar(0.0), Scalar(1.0) - weakening);
-                    Scalar delta
-                        = m_smooth_kappa * m_sigma * slow::pow(one_minus_w, m_smooth_beta);
+                    Scalar delta = evaluateSmoothDelta(weakening);
                     Scalar r1 = m_r_elbow - delta;
                     Scalar r2 = m_r_elbow + delta;
-                    if (r1 <= m_smooth_r_min)
-                        {
-                        throw std::invalid_argument(
-                            "ReactiveLJForceCompute: r_elbow - delta must be greater than r_min; "
-                            "decrease delta or decrease r_min.");
-                        }
-                    if (r2 >= m_r_cut)
-                        {
-                        throw std::invalid_argument(
-                            "ReactiveLJForceCompute: r_elbow + delta must be less than r_cut; "
-                            "decrease delta or increase r_cut.");
-                        }
                     const Scalar width = r2 - r1;
                     if (delta > m_smooth_delta_tol && width > m_smooth_delta_tol && r > r1
                         && r < r2)
@@ -808,18 +938,19 @@ void ReactiveLJForceCompute::computeForces(uint64_t timestep)
             // -----------------------------
             Scalar force_divr_coord = Scalar(0.0);
 
-            if (r > m_weakening_inner && r < m_weakening_outer)
+            if (in_coord_window)
                 {
                 // Compute dU_ij/dC_exc for THIS pair, fully analytically.
-                const Scalar dU_dCexc_pair = evaluate_dU_dCexc(r, C_exc);
+                Scalar dU_dCexc_pair = Scalar(0.0);
+                if (in_pair)
+                    {
+                    dU_dCexc_pair = evaluate_dU_dCexc(r, C_exc);
+                    }
 
                 // Remove this pair's "self" contribution from the lambda sum.
                 const Scalar lambda_sum = h_lambda.data[i] + h_lambda.data[j];
                 const Scalar lambda_other_sum
                     = lambda_sum - Scalar(2.0) * gate * dU_dCexc_pair;
-
-                // Convert to a physical force along r_ij via w'(r).
-                const Scalar dw_dr = evaluateWeightDerivative(r);
 
                 // dU/dr via coordination = lambda_other_sum * dw/dr  =>  F = -dU/dr
                 const Scalar force_mag_coord = -(lambda_other_sum * dw_dr);
@@ -943,32 +1074,57 @@ Scalar ReactiveLJForceCompute::computeWeight(Scalar distance) const
         return Scalar(1.0);
         }
 
-    const Scalar pi = Scalar(3.141592653589793238462643383279502884L);
     const Scalar fraction = (distance - m_weakening_inner) * m_inverse_span;
-    const Scalar angle = pi * fraction;
-    return Scalar(0.5) * (Scalar(1.0) + slow::cos(angle));
+    Scalar sin_fraction = Scalar(0.0);
+    Scalar cos_fraction = Scalar(0.0);
+    fast::sincospi(fraction, sin_fraction, cos_fraction);
+    (void)sin_fraction;
+    return Scalar(0.5) * (Scalar(1.0) + cos_fraction);
+    }
+
+void ReactiveLJForceCompute::computeWeightAndDerivative(Scalar distance,
+                                                        Scalar& weight,
+                                                        Scalar& dw_dr) const
+    {
+    if (distance >= m_weakening_outer)
+        {
+        weight = Scalar(0.0);
+        dw_dr = Scalar(0.0);
+        return;
+        }
+    if (distance <= m_weakening_inner)
+        {
+        weight = Scalar(1.0);
+        dw_dr = Scalar(0.0);
+        return;
+        }
+
+    const Scalar fraction = (distance - m_weakening_inner) * m_inverse_span;
+    Scalar sin_fraction = Scalar(0.0);
+    Scalar cos_fraction = Scalar(0.0);
+    fast::sincospi(fraction, sin_fraction, cos_fraction);
+    weight = Scalar(0.5) * (Scalar(1.0) + cos_fraction);
+    dw_dr = -Scalar(0.5) * sin_fraction * m_pi_inverse_span;
     }
 
 Scalar ReactiveLJForceCompute::evaluateEnergy(Scalar distance) const
     {
     const Scalar r = std::max(distance, m_smooth_r_min);
     const Scalar inv_r = Scalar(1.0) / r;
-    const Scalar sr = m_sigma * inv_r;
-    const Scalar sr2 = sr * sr;
-    const Scalar sr6 = sr2 * sr2 * sr2;
-    const Scalar sr12 = sr6 * sr6;
-    return Scalar(4.0) * m_epsilon * (sr12 - sr6) - m_energy_shift;
+    const Scalar inv_r2 = inv_r * inv_r;
+    const Scalar inv_r6 = inv_r2 * inv_r2 * inv_r2;
+    const Scalar inv_r12 = inv_r6 * inv_r6;
+    return m_lj_energy12 * inv_r12 - m_lj_energy6 * inv_r6 - m_energy_shift;
     }
 
 Scalar ReactiveLJForceCompute::evaluateForceMagnitude(Scalar distance) const
     {
     const Scalar r = std::max(distance, m_smooth_r_min);
     const Scalar inv_r = Scalar(1.0) / r;
-    const Scalar sr = m_sigma * inv_r;
-    const Scalar sr2 = sr * sr;
-    const Scalar sr6 = sr2 * sr2 * sr2;
-    const Scalar sr12 = sr6 * sr6;
-    return Scalar(24.0) * m_epsilon * inv_r * (Scalar(2.0) * sr12 - sr6);
+    const Scalar inv_r2 = inv_r * inv_r;
+    const Scalar inv_r6 = inv_r2 * inv_r2 * inv_r2;
+    const Scalar inv_r12 = inv_r6 * inv_r6;
+    return m_lj_force12 * inv_r12 * inv_r - m_lj_force6 * inv_r6 * inv_r;
     }
 
 namespace detail
