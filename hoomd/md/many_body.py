@@ -505,6 +505,149 @@ class SquareDensity(Triplet):
         self._add_typeparam(params)
 
 
+class LiuOConnorTersoff(Force):
+    r"""Optimized Liu/O'Connor isotropic Tersoff force.
+
+    `LiuOConnorTersoff` implements the restricted Tersoff form used for the
+    associative sticker comparison in Liu and O'Connor. It assumes one sticky
+    particle type, :math:`g(\theta)=1`, and no distance-mismatch term
+    (:math:`\lambda_3=0`), so the bond-order coordination is just
+    :math:`\chi_{ij}=\sum_{k \ne i,j} f_C(r_{ik})`.
+
+    This class is intended for side-by-side timing comparisons with
+    `Tersoff`, not as a general replacement for `Tersoff`.
+
+    Attributes:
+        nlist (hoomd.md.nlist.NeighborList): Neighbor list used to construct the
+            interaction.
+        sticky_type (str): Particle type that participates in the sticky
+            interaction.
+        A1 (float): Repulsive magnitude.
+        A2 (float): Attractive magnitude.
+        lambda1 (float): Repulsive exponential factor.
+        lambda2 (float): Attractive exponential factor.
+        dimer_r (float): Dimer reference separation.
+        cutoff_thickness (float): Thickness of the exponential cutoff shell.
+        r_cut (float): Cutoff distance.
+        alpha (float): Cutoff smoothing parameter using the same sign convention
+            as `Tersoff`.
+        n (float): Bond-order exponent.
+        gamma (float): Bond-order prefactor.
+    """
+
+    __doc__ = inspect.cleandoc(__doc__).replace(
+        "{inherited}", inspect.cleandoc(Force._doc_inherited)
+    )
+
+    def __init__(
+        self,
+        nlist,
+        sticky_type,
+        A1,
+        A2,
+        lambda1,
+        lambda2,
+        dimer_r,
+        cutoff_thickness,
+        r_cut,
+        alpha,
+        n,
+        gamma,
+    ):
+        super().__init__()
+
+        param_dict = ParameterDict(
+            nlist=hoomd.md.nlist.NeighborList,
+            sticky_type=str,
+            A1=nonnegative_real,
+            A2=nonnegative_real,
+            lambda1=float,
+            lambda2=float,
+            dimer_r=positive_real,
+            cutoff_thickness=positive_real,
+            r_cut=positive_real,
+            alpha=float,
+            n=positive_real,
+            gamma=nonnegative_real,
+        )
+
+        param_dict["nlist"] = nlist
+        param_dict["sticky_type"] = sticky_type
+        param_dict["A1"] = A1
+        param_dict["A2"] = A2
+        param_dict["lambda1"] = lambda1
+        param_dict["lambda2"] = lambda2
+        param_dict["dimer_r"] = dimer_r
+        param_dict["cutoff_thickness"] = cutoff_thickness
+        param_dict["r_cut"] = r_cut
+        param_dict["alpha"] = alpha
+        param_dict["n"] = n
+        param_dict["gamma"] = gamma
+
+        self._param_dict.update(param_dict)
+
+    def _effective_parameters(self):
+        if self.cutoff_thickness >= self.r_cut:
+            raise ValueError("cutoff_thickness must be less than r_cut")
+
+        return (
+            self.A1,
+            self.A2,
+            self.lambda1,
+            self.lambda2,
+            self.dimer_r,
+            self.cutoff_thickness,
+            self.r_cut,
+            self.alpha,
+            self.n,
+            self.gamma,
+        )
+
+    def _apply_cpp_parameters(self):
+        if not self._attached:
+            return
+
+        self._cpp_obj.setParameters(*self._effective_parameters())
+
+    def _setattr_param(self, attr, value):
+        if attr == "nlist":
+            if self._attached:
+                raise RuntimeError("nlist cannot be set after scheduling.")
+            self._param_dict._dict["nlist"] = value
+            return
+        if attr == "sticky_type" and self._attached:
+            raise RuntimeError("sticky_type cannot be set after scheduling.")
+
+        super()._setattr_param(attr, value)
+
+        if attr not in ("nlist", "sticky_type"):
+            self._apply_cpp_parameters()
+
+    def _attach_hook(self):
+        if self.nlist._attached and self.nlist._simulation != self._simulation:
+            warnings.warn(
+                f"{self} object is creating a new equivalent neighbor list."
+                f" This is happending since the force is moving to a new "
+                f"simulation. Explicitly set the nlist to hide this warning.",
+                RuntimeWarning,
+            )
+            self.nlist = copy.deepcopy(self.nlist)
+
+        self.nlist._attach(self._simulation)
+
+        if isinstance(self._simulation.device, hoomd.device.CPU):
+            cpp_cls = _md.LiuOConnorTersoffForceCompute
+        else:
+            cpp_cls = _md.LiuOConnorTersoffForceComputeGPU
+
+        self._cpp_obj = cpp_cls(
+            self._simulation.state._cpp_sys_def,
+            self.nlist._cpp_obj,
+            self.sticky_type,
+            *self._effective_parameters(),
+        )
+
+
 class ReactiveLJ(Force):
     r"""Coordination-attenuated Lennard-Jones force.
 
@@ -706,6 +849,7 @@ class ReactiveLJ(Force):
 
 
 __all__ = [
+    "LiuOConnorTersoff",
     "ReactiveLJ",
     "RevCross",
     "SquareDensity",

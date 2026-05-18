@@ -32,6 +32,7 @@ void export_TableDihedralForceCompute(pybind11::module& m);
 void export_HarmonicImproperForceCompute(pybind11::module& m);
 void export_BondTablePotential(pybind11::module& m);
 void export_CustomForceCompute(pybind11::module& m);
+void export_LiuOConnorTersoffForceCompute(pybind11::module& m);
 void export_ReactiveLJForceCompute(pybind11::module& m);
 void export_NeighborList(pybind11::module& m);
 void export_NeighborListBinned(pybind11::module& m);
@@ -195,6 +196,7 @@ void export_ActiveForceComputeGPU(pybind11::module& m);
 void export_ComputeThermoGPU(pybind11::module& m);
 void export_ComputeThermoHMAGPU(pybind11::module& m);
 void export_ConstantForceComputeGPU(pybind11::module& m);
+void export_LiuOConnorTersoffForceComputeGPU(pybind11::module& m);
 void export_ReactiveLJForceComputeGPU(pybind11::module& m);
 void export_HarmonicAngleForceComputeGPU(pybind11::module& m);
 void export_CosineSqAngleForceComputeGPU(pybind11::module& m);
@@ -435,6 +437,7 @@ PYBIND11_MODULE(_md, m)
     export_PotentialSpecialPairCoulomb(m);
 
     export_CustomForceCompute(m);
+    export_LiuOConnorTersoffForceCompute(m);
     export_ReactiveLJForceCompute(m);
     export_NeighborList(m);
     export_NeighborListBinned(m);
@@ -559,6 +562,7 @@ PYBIND11_MODULE(_md, m)
     export_ActiveForceConstraintComputePrimitiveGPU(m);
     export_ActiveForceConstraintComputeSphereGPU(m);
     export_ConstantForceComputeGPU(m);
+    export_LiuOConnorTersoffForceComputeGPU(m);
     export_ReactiveLJForceComputeGPU(m);
     export_PotentialExternalPeriodicGPU(m);
     export_PotentialExternalElectricFieldGPU(m);
